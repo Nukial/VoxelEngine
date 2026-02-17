@@ -131,6 +131,9 @@ namespace VoxelEngine
         private uint[] _readbackData;
         private bool _needsUpdate;
         private bool _hasAssignedMesh;
+        private int _lastTopologyHash;
+        private int _lastFaceCount = -1;
+        private bool _hasTopologyCache;
 
         // Greedy mesh data
         private List<Vector3> _vertices = new List<Vector3>();
@@ -141,6 +144,7 @@ namespace VoxelEngine
             _meshCollider = GetComponent<MeshCollider>();
             _collisionMesh = new Mesh();
             _collisionMesh.name = "VoxelCollisionMesh";
+            _collisionMesh.MarkDynamic();
             _meshCollider.sharedMesh = _collisionMesh;
         }
 
@@ -246,16 +250,32 @@ namespace VoxelEngine
                     float scale = voxelWorld.VoxelScale;
                     Vector3 origin = voxelWorld.WorldOrigin;
 
+                    uint topologyHash = 2166136261u;
+                    int faceCount = 0;
+
                     for (int i = 0; i < voxelCount; i++)
                     {
                         reader.BeginForEachIndex(i);
                         while (reader.RemainingItemCount > 0)
                         {
                             FaceRecord face = reader.Read<FaceRecord>();
+                            faceCount++;
+                            topologyHash = Fnv1a(topologyHash, face.x);
+                            topologyHash = Fnv1a(topologyHash, face.y);
+                            topologyHash = Fnv1a(topologyHash, face.z);
+                            topologyHash = Fnv1a(topologyHash, face.face);
                             AddFaceQuad(face.x, face.y, face.z, face.face, scale, origin);
                         }
                         reader.EndForEachIndex();
                     }
+
+                    int currentHash = unchecked((int)topologyHash);
+                    if (_hasTopologyCache && _lastFaceCount == faceCount && _lastTopologyHash == currentHash)
+                        return;
+
+                    _lastFaceCount = faceCount;
+                    _lastTopologyHash = currentHash;
+                    _hasTopologyCache = true;
                 }
                 finally
                 {
@@ -275,17 +295,34 @@ namespace VoxelEngine
                     _meshCollider.sharedMesh = null;
                     _hasAssignedMesh = false;
                 }
+                _hasTopologyCache = false;
+                _lastFaceCount = -1;
                 return;
             }
 
             _collisionMesh.Clear();
             _collisionMesh.SetVertices(_vertices);
             _collisionMesh.SetTriangles(_triangles, 0);
-            _collisionMesh.RecalculateBounds();
+
+            float s = voxelWorld.VoxelScale;
+            Vector3 o = voxelWorld.WorldOrigin;
+            Vector3 bMin = new Vector3(minX * s + o.x, minY * s + o.y, minZ * s + o.z);
+            Vector3 bMax = new Vector3(maxX * s + o.x, maxY * s + o.y, maxZ * s + o.z);
+            _collisionMesh.bounds = new Bounds((bMin + bMax) * 0.5f, bMax - bMin);
 
             _meshCollider.sharedMesh = null;
             _meshCollider.sharedMesh = _collisionMesh;
             _hasAssignedMesh = true;
+        }
+
+        private static uint Fnv1a(uint hash, int value)
+        {
+            unchecked
+            {
+                hash ^= (uint)value;
+                hash *= 16777619u;
+                return hash;
+            }
         }
 
         private void FillPaddedVoxelData(
