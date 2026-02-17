@@ -630,10 +630,28 @@ Shader "VoxelEngine/RayMarch"
                 float3 finalColor = baseColor * (ambient + diffuse) + specular;
                 
                 // --- Emission from light level (propagated voxel light) ---
-                uint lightLevel = GetLightLevel(voxelData);
-                if (lightLevel > 0)
+                // Spatially smooth light by averaging with 6 neighbors to reduce
+                // discrete banding and per-frame flicker from propagation convergence.
+                uint centerLight = GetLightLevel(voxelData);
+                float smoothedLight = float(centerLight) * 3.0;
+                float lightWeight = 3.0;
                 {
-                    float lightFactor = float(lightLevel) / 15.0;
+                    int3 nOffsets[6] = {
+                        int3(1,0,0), int3(-1,0,0),
+                        int3(0,1,0), int3(0,-1,0),
+                        int3(0,0,1), int3(0,0,-1)
+                    };
+                    [unroll]
+                    for (int li = 0; li < 6; li++)
+                    {
+                        int3 nPos = voxelPos + nOffsets[li];
+                        smoothedLight += float(GetLightLevel(ReadVoxel(nPos)));
+                        lightWeight += 1.0;
+                    }
+                }
+                float lightFactor = smoothedLight / (lightWeight * 15.0);
+                if (lightFactor > 0.001)
+                {
                     // Warm light tint from nearby emissive sources
                     float3 voxelLightColor = float3(1.0, 0.7, 0.3) * lightFactor * 0.8;
                     finalColor += baseColor * voxelLightColor;

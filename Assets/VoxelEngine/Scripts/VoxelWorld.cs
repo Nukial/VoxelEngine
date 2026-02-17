@@ -41,6 +41,7 @@ namespace VoxelEngine
         [SerializeField] private bool enableSimulation = true;
         [SerializeField] [Range(1, 8)] private int simulationStepsPerFrame = 1;
         [SerializeField] [Range(5f, 120f)] private float simulationTickRate = 30f;
+        [SerializeField] [Range(1, 8)] private int lightPropagationPasses = 5;
 
         [Header("Fire Simulation")]
         [SerializeField] private FireSimulationProfile fireProfile = FireSimulationProfile.Realistic;
@@ -114,6 +115,8 @@ namespace VoxelEngine
         private int _simClearKernel;
         private int _brickMapKernel;
         private int _heatLightKernel;
+        private int _lightOnlyKernel;
+        private bool _kernelsCached;
 
         // Frame counter for simulation randomness
         private uint _frameCount;
@@ -281,10 +284,29 @@ namespace VoxelEngine
         private void Initialize()
         {
             CreateBuffers();
+            CacheKernelIDs();
             CreateRenderingComponents();
             GenerateTerrain();
             UpdateBrickMap();
             UpdateRenderProperties();
+        }
+
+        private void CacheKernelIDs()
+        {
+            if (_kernelsCached) return;
+
+            if (simulationShader != null)
+            {
+                _simClearKernel = simulationShader.FindKernel("ClearWriteBuffer");
+                _simKernel = simulationShader.FindKernel("SimulateVoxels");
+                _heatLightKernel = simulationShader.FindKernel("PropagateHeatAndLight");
+                _lightOnlyKernel = simulationShader.FindKernel("PropagateLightOnly");
+            }
+
+            if (brickMapShader != null)
+                _brickMapKernel = brickMapShader.FindKernel("UpdateBrickMap");
+
+            _kernelsCached = true;
         }
 
         private void CreateBuffers()
@@ -433,13 +455,11 @@ namespace VoxelEngine
         private void RunSimulationStep()
         {
             if (simulationShader == null) return;
-
-            _simClearKernel = simulationShader.FindKernel("ClearWriteBuffer");
-            _simKernel = simulationShader.FindKernel("SimulateVoxels");
-            _heatLightKernel = simulationShader.FindKernel("PropagateHeatAndLight");
+            CacheKernelIDs();
 
             var readBuf = ReadBuffer;
             var writeBuf = WriteBuffer;
+            int simGroups = Mathf.CeilToInt(worldSize / 4f);
 
             // Phase 1: Clear write buffer
             simulationShader.SetBuffer(_simClearKernel, PropWriteBuffer, writeBuf);
@@ -453,17 +473,10 @@ namespace VoxelEngine
             simulationShader.SetInt(PropWorldSize, worldSize);
             simulationShader.SetInt(PropFrameCount, (int)_frameCount);
             simulationShader.SetInt(PropSimStep, (int)_simStep);
-
-            int simGroups = Mathf.CeilToInt(worldSize / 4f);
             simulationShader.Dispatch(_simKernel, simGroups, simGroups, simGroups);
 
-            // Phase 3: Clear read buffer to reuse it as heat/light destination
-            simulationShader.SetBuffer(_simClearKernel, PropWriteBuffer, readBuf);
-            simulationShader.SetInt(PropWorldSize, worldSize);
-            simulationShader.Dispatch(_simClearKernel, clearGroups, 1, 1);
-
-            // Phase 4: Propagate heat/light with stable read->write buffers
-            // Read from simulation output (writeBuf), write final state into readBuf.
+            // Phase 3: Heat + Light + State changes (writeBuf -> readBuf)
+            // The kernel writes every position (air=0), so no separate clear needed.
             simulationShader.SetBuffer(_heatLightKernel, PropReadBuffer, writeBuf);
             simulationShader.SetBuffer(_heatLightKernel, PropWriteBuffer, readBuf);
             simulationShader.SetInt(PropWorldSize, worldSize);
@@ -471,7 +484,24 @@ namespace VoxelEngine
             ApplyFireSimulationTuning(_heatLightKernel);
             simulationShader.Dispatch(_heatLightKernel, simGroups, simGroups, simGroups);
 
-            // Do not swap here: final state already written back to ReadBuffer.
+            // Phase 4: Multi-pass light-only propagation for faster convergence.
+            // Reduces flickering by allowing light to propagate multiple voxels per tick.
+            // After Phase 3, result is in readBuf. Extra passes ping-pong between buffers.
+            // Must use an even number of extra passes so final result stays in readBuf.
+            int extraPasses = Mathf.Max(0, lightPropagationPasses - 1);
+            if (extraPasses % 2 != 0) extraPasses++;
+
+            for (int pass = 0; pass < extraPasses; pass++)
+            {
+                bool readFromRead = (pass % 2 == 0);
+                var src = readFromRead ? readBuf : writeBuf;
+                var dst = readFromRead ? writeBuf : readBuf;
+
+                simulationShader.SetBuffer(_lightOnlyKernel, PropReadBuffer, src);
+                simulationShader.SetBuffer(_lightOnlyKernel, PropWriteBuffer, dst);
+                simulationShader.Dispatch(_lightOnlyKernel, simGroups, simGroups, simGroups);
+            }
+
             _simStep++;
         }
 
@@ -538,8 +568,7 @@ namespace VoxelEngine
         private void UpdateBrickMap()
         {
             if (brickMapShader == null) return;
-
-            _brickMapKernel = brickMapShader.FindKernel("UpdateBrickMap");
+            CacheKernelIDs();
 
             brickMapShader.SetBuffer(_brickMapKernel, PropVoxelBuffer, ReadBuffer);
             brickMapShader.SetBuffer(_brickMapKernel, PropBrickMap, _brickMapBuffer);
@@ -985,6 +1014,7 @@ namespace VoxelEngine
             _voxelBufferB = null;
             _brickMapBuffer = null;
             _cpuReadbackCache = null;
+            _kernelsCached = false;
 
             if (_rayMarchMaterial != null)
             {
