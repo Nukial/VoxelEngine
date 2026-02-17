@@ -116,6 +116,7 @@ namespace VoxelEngine
         private int _brickMapKernel;
         private int _heatLightKernel;
         private int _lightOnlyKernel;
+        private int _copyKernel;
         private bool _kernelsCached;
 
         // Frame counter for simulation randomness
@@ -132,6 +133,12 @@ namespace VoxelEngine
         private Quaternion _lastCameraRot;
         private Light _cachedDirectionalLight;
         private float _nextDirectionalLightSearchTime;
+
+        // Batched write queue: CPU-side writes are collected and uploaded
+        // to the GPU once per frame before simulation reads the buffer.
+        // Avoids per-voxel SetData overhead and mid-frame GPU stalls.
+        private readonly List<VoxelWrite> _pendingWrites = new List<VoxelWrite>(256);
+        private uint[] _pendingWriteValues;
 
         // Properties for external access
         public int WorldSize => worldSize;
@@ -199,6 +206,11 @@ namespace VoxelEngine
         private void Update()
         {
             if (!Application.isPlaying) return;
+
+            // Flush all queued voxel writes to the GPU in a single batched
+            // upload before simulation reads the buffer. This avoids many
+            // tiny SetData calls and prevents mid-frame GPU sync issues.
+            FlushPendingWrites();
 
             // Run simulation
             if (enableSimulation)
@@ -278,6 +290,50 @@ namespace VoxelEngine
         }
 
         // =====================================================================
+        // Batched Write Upload
+        // =====================================================================
+
+        /// <summary>
+        /// Uploads all queued voxel modifications to the GPU in one pass.
+        /// Sorts writes by buffer index and uploads contiguous runs to
+        /// minimise the number of SetData calls. Called once per frame
+        /// before simulation dispatches so CPU writes are visible to the
+        /// GPU compute shaders without per-voxel upload overhead.
+        /// </summary>
+        private void FlushPendingWrites()
+        {
+            int count = _pendingWrites.Count;
+            if (count == 0 || ReadBuffer == null) return;
+
+            // Sort by index for contiguous-run detection
+            _pendingWrites.Sort((a, b) => a.index.CompareTo(b.index));
+
+            // Reuse values array to avoid per-frame allocation
+            if (_pendingWriteValues == null || _pendingWriteValues.Length < count)
+                _pendingWriteValues = new uint[Mathf.Max(count, 256)];
+
+            for (int i = 0; i < count; i++)
+                _pendingWriteValues[i] = _pendingWrites[i].value;
+
+            // Upload contiguous runs in as few SetData calls as possible
+            int runStart = 0;
+            while (runStart < count)
+            {
+                int runEnd = runStart + 1;
+                while (runEnd < count &&
+                       _pendingWrites[runEnd].index == _pendingWrites[runEnd - 1].index + 1)
+                    runEnd++;
+
+                int gpuStart = _pendingWrites[runStart].index;
+                int runLength = runEnd - runStart;
+                ReadBuffer.SetData(_pendingWriteValues, runStart, gpuStart, runLength);
+                runStart = runEnd;
+            }
+
+            _pendingWrites.Clear();
+        }
+
+        // =====================================================================
         // Initialization
         // =====================================================================
 
@@ -301,6 +357,7 @@ namespace VoxelEngine
                 _simKernel = simulationShader.FindKernel("SimulateVoxels");
                 _heatLightKernel = simulationShader.FindKernel("PropagateHeatAndLight");
                 _lightOnlyKernel = simulationShader.FindKernel("PropagateLightOnly");
+                _copyKernel = simulationShader.FindKernel("CopyBuffer");
             }
 
             if (brickMapShader != null)
@@ -318,11 +375,10 @@ namespace VoxelEngine
             _voxelBufferB = new GraphicsBuffer(GraphicsBuffer.Target.Structured, total, sizeof(uint));
             _brickMapBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, brickTotal, sizeof(uint));
 
-            // Clear buffers
-            var clearData = new uint[total];
-            _voxelBufferA.SetData(clearData);
-            _voxelBufferB.SetData(clearData);
-
+            // Brick map is small (~16 KB); clear with managed array.
+            // Voxel buffers are fully overwritten by terrain generation
+            // and the subsequent GPU CopyBuffer dispatch, so no
+            // managed-array allocation is needed to zero them.
             var clearBrick = new uint[brickTotal];
             _brickMapBuffer.SetData(clearBrick);
 
@@ -440,10 +496,24 @@ namespace VoxelEngine
             int groups = Mathf.CeilToInt(worldSize / 4f);
             terrainGenShader.Dispatch(_terrainKernel, groups, groups, groups);
 
-            // Copy A to B for initial state using a compute shader or manual copy
-            var tempData = new uint[TotalVoxels];
-            _voxelBufferA.GetData(tempData);
-            _voxelBufferB.SetData(tempData);
+            // Copy A→B entirely on GPU using CopyBuffer compute kernel.
+            // This avoids an 8 MB GPU→CPU→GPU round-trip that would
+            // stall the CPU while waiting for the GPU readback to finish.
+            if (simulationShader != null)
+            {
+                simulationShader.SetBuffer(_copyKernel, PropReadBuffer, _voxelBufferA);
+                simulationShader.SetBuffer(_copyKernel, PropWriteBuffer, _voxelBufferB);
+                simulationShader.SetInt(PropWorldSize, worldSize);
+                int copyGroups = Mathf.CeilToInt(TotalVoxels / 256f);
+                simulationShader.Dispatch(_copyKernel, copyGroups, 1, 1);
+            }
+            else
+            {
+                // Fallback: CPU round-trip when simulation shader is absent.
+                var tempData = new uint[TotalVoxels];
+                _voxelBufferA.GetData(tempData);
+                _voxelBufferB.SetData(tempData);
+            }
 
             Debug.Log("[VoxelWorld] Terrain generated successfully");
         }
@@ -765,7 +835,7 @@ namespace VoxelEngine
         {
             if (!VoxelData.IsInBounds(pos, worldSize)) return;
             int idx = VoxelData.Flatten3D(pos, worldSize);
-            ReadBuffer.SetData(new uint[] { voxelData }, 0, idx, 1);
+            _pendingWrites.Add(new VoxelWrite { index = idx, value = voxelData });
         }
 
         /// <summary>
@@ -774,7 +844,6 @@ namespace VoxelEngine
         public void SetVoxelSphere(Vector3 center, float radius, uint materialId)
         {
             int r = Mathf.CeilToInt(radius);
-            var writes = new List<VoxelWrite>();
             uint voxelValue = materialId == VoxelData.MAT_AIR ? 0u : VoxelData.PackWithDefaultColor(materialId);
 
             for (int z = -r; z <= r; z++)
@@ -791,34 +860,7 @@ namespace VoxelEngine
                 if (new Vector3(x, y, z).magnitude > radius) continue;
 
                 int idx = VoxelData.Flatten3D(pos, worldSize);
-                writes.Add(new VoxelWrite { index = idx, value = voxelValue });
-            }
-
-            if (writes.Count == 0)
-                return;
-
-            writes.Sort((a, b) => a.index.CompareTo(b.index));
-
-            int count = writes.Count;
-            var indices = new int[count];
-            var values = new uint[count];
-            for (int i = 0; i < count; i++)
-            {
-                indices[i] = writes[i].index;
-                values[i] = writes[i].value;
-            }
-
-            int runStart = 0;
-            while (runStart < count)
-            {
-                int runEnd = runStart + 1;
-                while (runEnd < count && indices[runEnd] == indices[runEnd - 1] + 1)
-                    runEnd++;
-
-                int gpuStart = indices[runStart];
-                int runLength = runEnd - runStart;
-                ReadBuffer.SetData(values, runStart, gpuStart, runLength);
-                runStart = runEnd;
+                _pendingWrites.Add(new VoxelWrite { index = idx, value = voxelValue });
             }
         }
 
@@ -1014,6 +1056,8 @@ namespace VoxelEngine
             _voxelBufferB = null;
             _brickMapBuffer = null;
             _cpuReadbackCache = null;
+            _pendingWrites.Clear();
+            _pendingWriteValues = null;
             _kernelsCached = false;
 
             if (_rayMarchMaterial != null)

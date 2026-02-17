@@ -9,6 +9,7 @@
 #pragma kernel SimulateVoxels
 #pragma kernel PropagateHeatAndLight
 #pragma kernel PropagateLightOnly
+#pragma kernel CopyBuffer
 
 #include "VoxelCommon.hlsl"
 
@@ -609,4 +610,19 @@ void PropagateLightOnly(uint3 id : SV_DispatchThreadID)
     // Preserve all voxel data, only update light level
     voxel = SetLightLevel(voxel, newLight);
     _WriteBuffer[Idx(pos)] = voxel;
+}
+
+// ============================================================================
+// GPU Buffer Copy Kernel
+// Copies _ReadBuffer → _WriteBuffer entirely on GPU.
+// Eliminates the need for an 8 MB GPU→CPU→GPU round-trip when duplicating
+// buffer contents (e.g. after terrain generation).
+// ============================================================================
+
+[numthreads(256, 1, 1)]
+void CopyBuffer(uint3 id : SV_DispatchThreadID)
+{
+    uint total = (uint)_WorldSize * (uint)_WorldSize * (uint)_WorldSize;
+    if (id.x < total)
+        _WriteBuffer[id.x] = _ReadBuffer[id.x];
 }
