@@ -51,6 +51,9 @@ namespace VoxelEngine
         [SerializeField] [Range(2f, 15f)] private float qualityTransitionSpeed = 6f;
 
         [Header("Lighting")]
+        [SerializeField] private bool syncWithUnityDirectionalLight = true;
+        [SerializeField] private Light directionalLightOverride;
+        [SerializeField] private bool syncAmbientFromRenderSettings = false;
         [SerializeField] private Color ambientColor = new Color(0.15f, 0.18f, 0.25f);
         [SerializeField] private Color sunColor = new Color(1f, 0.95f, 0.85f);
         [SerializeField] private float sunIntensity = 1.2f;
@@ -94,6 +97,8 @@ namespace VoxelEngine
         private float _simulationAccumulator;
         private float _motionBlend; // 0=still, 1=moving, smoothly interpolated
         private Quaternion _lastCameraRot;
+        private Light _cachedDirectionalLight;
+        private float _nextDirectionalLightSearchTime;
 
         // Properties for external access
         public int WorldSize => worldSize;
@@ -438,6 +443,8 @@ namespace VoxelEngine
         {
             if (_rayMarchMaterial == null) return;
 
+            UpdateLightingFromUnity();
+
             // Smooth motion detection: interpolate between still/moving states
             float rawMotion = GetCameraMotionIntensity();
             float targetBlend = rawMotion > 0f ? Mathf.Clamp01(rawMotion) : 0f;
@@ -509,6 +516,42 @@ namespace VoxelEngine
                 shadowStr = 0f;
             }
             _rayMarchMaterial.SetFloat(PropShadowStrength, shadowStr);
+        }
+
+        private void UpdateLightingFromUnity()
+        {
+            if (!syncWithUnityDirectionalLight)
+                return;
+
+            Light source = directionalLightOverride;
+            if (source == null)
+            {
+                if (_cachedDirectionalLight == null)
+                {
+                    if (Time.time >= _nextDirectionalLightSearchTime)
+                    {
+                        _cachedDirectionalLight = RenderSettings.sun;
+                        _nextDirectionalLightSearchTime = Time.time + 1f;
+                    }
+                }
+                else
+                {
+                    if (!Application.isPlaying || !_cachedDirectionalLight.isActiveAndEnabled)
+                        _cachedDirectionalLight = null;
+                }
+
+                source = _cachedDirectionalLight;
+            }
+
+            if (source == null || source.type != LightType.Directional || !source.isActiveAndEnabled)
+                return;
+
+            sunDirection = -source.transform.forward;
+            sunColor = source.color;
+            sunIntensity = source.intensity;
+
+            if (syncAmbientFromRenderSettings)
+                ambientColor = RenderSettings.ambientLight;
         }
 
         /// <summary>
