@@ -43,8 +43,10 @@ namespace VoxelEngine
         [SerializeField] private bool enableAdaptiveQuality = true;
         [SerializeField] [Range(64, 512)] private int movingRaySteps = 192;
         [SerializeField] [Range(16, 256)] private int movingShadowSteps = 48;
+        [SerializeField] [Range(0.4f, 1.0f)] private float movingShadowStepFloor = 0.75f;
         [SerializeField] [Min(0.001f)] private float cameraMotionThreshold = 0.02f;
         [SerializeField] private bool reduceShadowsWhileMoving = true;
+        [SerializeField] private bool stabilizeLightingWhileMoving = true;
         [SerializeField] [Range(0.1f, 0.5f)] private float movingShadowIntensity = 0.35f;
         [SerializeField] [Range(2f, 15f)] private float qualityTransitionSpeed = 6f;
 
@@ -452,8 +454,12 @@ namespace VoxelEngine
                 // Smoothly blend ray steps between full quality and moving quality
                 runtimeMaxRaySteps = Mathf.RoundToInt(
                     Mathf.Lerp(maxRaySteps, Mathf.Min(maxRaySteps, movingRaySteps), _motionBlend));
+
+                int movingShadowTarget = Mathf.Min(maxShadowSteps, movingShadowSteps);
+                int shadowFloor = Mathf.RoundToInt(maxShadowSteps * movingShadowStepFloor);
+                movingShadowTarget = Mathf.Max(movingShadowTarget, shadowFloor);
                 runtimeMaxShadowSteps = Mathf.RoundToInt(
-                    Mathf.Lerp(maxShadowSteps, Mathf.Min(maxShadowSteps, movingShadowSteps), _motionBlend));
+                    Mathf.Lerp(maxShadowSteps, movingShadowTarget, _motionBlend));
             }
 
             // Use Cull Off to avoid blind/dead angles caused by dynamic cull
@@ -494,7 +500,7 @@ namespace VoxelEngine
             if (enableShadows)
             {
                 _rayMarchMaterial.EnableKeyword("VOXEL_SHADOWS_ON");
-                if (reduceShadowsWhileMoving)
+                if (reduceShadowsWhileMoving && !stabilizeLightingWhileMoving)
                     shadowStr = Mathf.Lerp(1f, movingShadowIntensity, _motionBlend);
             }
             else
@@ -550,7 +556,7 @@ namespace VoxelEngine
 
             // Normalize: position delta weighted by threshold, rotation weighted by degrees
             float posIntensity = Mathf.Clamp01(posDelta / Mathf.Max(cameraMotionThreshold * 5f, 0.01f));
-            float rotIntensity = Mathf.Clamp01(rotDelta / 3f); // 3 degrees = full intensity
+            float rotIntensity = Mathf.Clamp01(rotDelta / 6f); // smoother for camera look changes
 
             return Mathf.Max(posIntensity, rotIntensity);
         }
@@ -828,6 +834,7 @@ namespace VoxelEngine
         {
             worldSize = Mathf.ClosestPowerOfTwo(Mathf.Clamp(worldSize, 32, 512));
             brickSize = Mathf.Clamp(brickSize, 4, 16);
+            movingShadowStepFloor = Mathf.Clamp01(movingShadowStepFloor);
 
             if (worldSize % brickSize != 0)
                 brickSize = 8;

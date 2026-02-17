@@ -540,7 +540,7 @@ Shader "VoxelEngine/RayMarch"
                 float shadowFactor = 1.0;
                 #ifdef VOXEL_SHADOWS_ON
                 {
-                    float3 shadowOrigin = float3(hit.voxelPos) + 0.5 + hit.normal * 1.01;
+                    float3 shadowOrigin = float3(hit.voxelPos) + 0.5 + hit.normal * 1.2 + L * 0.15;
                     if (CastShadowRay(shadowOrigin, L, _MaxShadowSteps))
                     {
                         // Blend shadow intensity based on _ShadowStrength
