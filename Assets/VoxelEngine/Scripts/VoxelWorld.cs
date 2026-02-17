@@ -37,6 +37,7 @@ namespace VoxelEngine
 
         [Header("Rendering")]
         [SerializeField] private Shader rayMarchShader;
+        [SerializeField] private VoxelIndirectInstanceRenderer indirectInstanceRenderer;
         [SerializeField] private int maxRaySteps = 512;
         [SerializeField] private int maxShadowSteps = 128;
         [SerializeField] private bool enableShadows = true;
@@ -118,6 +119,7 @@ namespace VoxelEngine
         public GraphicsBuffer BrickMapBuffer => _brickMapBuffer;
         public Vector3 WorldOrigin => transform.position;
         public float WorldExtent => worldSize * voxelScale;
+        public VoxelIndirectInstanceRenderer IndirectInstanceRenderer => indirectInstanceRenderer;
 
         // Shader property IDs (cached)
         private static readonly int PropVoxelBuffer = Shader.PropertyToID("_VoxelBuffer");
@@ -274,6 +276,9 @@ namespace VoxelEngine
 
         private void CreateRenderingComponents()
         {
+            if (indirectInstanceRenderer == null)
+                indirectInstanceRenderer = GetComponent<VoxelIndirectInstanceRenderer>();
+
             if (rayMarchShader == null)
             {
                 rayMarchShader = Shader.Find("VoxelEngine/RayMarch");
@@ -486,7 +491,12 @@ namespace VoxelEngine
             {
                 float distToCenter = Vector3.Distance(camera.transform.position,
                     WorldOrigin + Vector3.one * WorldExtent * 0.5f);
-                float distRatio = Mathf.Clamp01(distToCenter / (WorldExtent * 1.5f));
+
+                float effectiveMaxDist = Mathf.Max(1f, maxRenderDistance);
+                float fadeStart = effectiveMaxDist * Mathf.Clamp01(renderDistanceFadeRatio);
+                float fadeRange = Mathf.Max(0.001f, effectiveMaxDist - fadeStart);
+                float distRatio = Mathf.Clamp01((distToCenter - fadeStart) / fadeRange);
+
                 float qualityMult = Mathf.Lerp(1f, distanceQualityFactor, distRatio);
                 runtimeMaxRaySteps = Mathf.Max(64, Mathf.RoundToInt(runtimeMaxRaySteps * qualityMult));
                 runtimeMaxShadowSteps = Mathf.Max(16, Mathf.RoundToInt(runtimeMaxShadowSteps * qualityMult));

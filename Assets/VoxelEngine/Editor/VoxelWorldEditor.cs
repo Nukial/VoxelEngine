@@ -31,7 +31,6 @@ namespace VoxelEngine.Editor
         private SerializedProperty _fogColor;
 
         private bool _showWorldInfo = true;
-        private bool _showMemoryInfo = true;
 
         private void OnEnable()
         {

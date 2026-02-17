@@ -207,8 +207,8 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 12617759}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalRotation: {x: 0.25666794, y: 0, z: 0, w: 0.9664997}
+  m_LocalPosition: {x: 16, y: 22.4, z: -6.4}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -227,7 +227,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3654ac7cf9f8a0a44b257ba57ba74fd8, type: 3}
   m_Name: 
   m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelInteraction
-  voxelWorld: {fileID: 1295750549}
+  voxelWorld: {fileID: 1167274014}
   mainCamera: {fileID: 12617761}
   maxReach: 50
   brushRadius: 1
@@ -299,7 +299,7 @@ MonoBehaviour:
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
   m_Version: 2
---- !u!1 &323497243
+--- !u!1 &182396261
 GameObject:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -307,8 +307,8 @@ GameObject:
   m_PrefabAsset: {fileID: 0}
   serializedVersion: 6
   m_Component:
-  - component: {fileID: 323497244}
-  - component: {fileID: 323497245}
+  - component: {fileID: 182396262}
+  - component: {fileID: 182396263}
   m_Layer: 0
   m_Name: VoxelDebugUI
   m_TagString: Untagged
@@ -316,37 +316,37 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!4 &323497244
+--- !u!4 &182396262
 Transform:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 323497243}
+  m_GameObject: {fileID: 182396261}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 1295750550}
+  m_Father: {fileID: 1167274015}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &323497245
+--- !u!114 &182396263
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 323497243}
+  m_GameObject: {fileID: 182396261}
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 383800feceac1cc48acae2727aaef7d2, type: 3}
   m_Name: 
   m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelDebugUI
-  voxelWorld: {fileID: 1295750549}
+  voxelWorld: {fileID: 1167274014}
   showDebugUI: 1
   toggleKey: 282
---- !u!1 &1295750548
+--- !u!1 &1167274012
 GameObject:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -354,8 +354,9 @@ GameObject:
   m_PrefabAsset: {fileID: 0}
   serializedVersion: 6
   m_Component:
-  - component: {fileID: 1295750550}
-  - component: {fileID: 1295750549}
+  - component: {fileID: 1167274015}
+  - component: {fileID: 1167274014}
+  - component: {fileID: 1167274013}
   m_Layer: 0
   m_Name: VoxelWorld
   m_TagString: Untagged
@@ -363,13 +364,35 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!114 &1295750549
+--- !u!114 &1167274013
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1295750548}
+  m_GameObject: {fileID: 1167274012}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2b729e7279dbfbc4d9e50f90964d963a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelIndirectInstanceRenderer
+  drawInPlayMode: 1
+  drawInEditMode: 1
+  shadowCastingMode: 0
+  receiveShadows: 0
+  autoCollectSources: 1
+  sourceRoot: {fileID: 0}
+  includeInactiveSources: 0
+  autoBoundsFromSources: 1
+  fallbackAutoBoundsSize: {x: 256, y: 256, z: 256}
+  groups: []
+--- !u!114 &1167274014
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1167274012}
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 179ed06eb17cfb8488afc15efaf05478, type: 3}
@@ -382,22 +405,23 @@ MonoBehaviour:
   terrainScale: 0.02
   caveScale: 0.06
   caveThreshold: 0.72
-  seed: 1938.001
+  seed: 42
   simulationShader: {fileID: 7200000, guid: 7b7953b379bd04443b3dacca0023703e, type: 3}
   brickMapShader: {fileID: 7200000, guid: 540db8e242e9b5744a1270b882c15b6a, type: 3}
   enableSimulation: 1
   simulationStepsPerFrame: 1
   simulationTickRate: 30
   rayMarchShader: {fileID: 4800000, guid: 2f883620e87280343a3f34667b86ec13, type: 3}
-  maxRaySteps: 512
-  maxShadowSteps: 128
+  indirectInstanceRenderer: {fileID: 1167274013}
+  maxRaySteps: 320
+  maxShadowSteps: 80
   enableShadows: 1
   maxRenderDistance: 80
   distanceQualityFactor: 0.6
   renderDistanceFadeRatio: 0.8
   enableAdaptiveQuality: 1
-  movingRaySteps: 192
-  movingShadowSteps: 48
+  movingRaySteps: 160
+  movingShadowSteps: 40
   movingShadowStepFloor: 0.75
   cameraMotionThreshold: 0.02
   reduceShadowsWhileMoving: 1
@@ -405,7 +429,7 @@ MonoBehaviour:
   movingShadowIntensity: 0.35
   qualityTransitionSpeed: 6
   syncWithUnityDirectionalLight: 1
-  directionalLightOverride: {fileID: 1727375046}
+  directionalLightOverride: {fileID: 0}
   syncAmbientFromRenderSettings: 0
   ambientColor: {r: 0.15, g: 0.18, b: 0.25, a: 1}
   sunColor: {r: 1, g: 0.95, b: 0.85, a: 1}
@@ -415,21 +439,21 @@ MonoBehaviour:
   fogColor: {r: 0.6, g: 0.75, b: 0.9, a: 1}
   cpuReadbackInterval: 0.08
   useAsyncCpuReadback: 1
---- !u!4 &1295750550
+--- !u!4 &1167274015
 Transform:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1295750548}
+  m_GameObject: {fileID: 1167274012}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
-  - {fileID: 323497244}
-  - {fileID: 1652305051}
+  - {fileID: 182396262}
+  - {fileID: 1842111929}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1538663256
@@ -546,80 +570,6 @@ MeshFilter:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1538663256}
   m_Mesh: {fileID: 10208, guid: 0000000000000000e000000000000000, type: 0}
---- !u!1 &1652305050
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 1652305051}
-  - component: {fileID: 1652305053}
-  - component: {fileID: 1652305052}
-  m_Layer: 0
-  m_Name: VoxelCollision
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!4 &1652305051
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1652305050}
-  serializedVersion: 2
-  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 1295750550}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &1652305052
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1652305050}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 24fad7d8c25f8b94b8597110e543261a, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelCollision
-  voxelWorld: {fileID: 1295750549}
-  trackTarget: {fileID: 12617762}
-  enableCollisionMeshing: 0
-  collisionRadius: 16
-  updateInterval: 0.25
-  movementThreshold: 2
-  debugDraw: 0
---- !u!64 &1652305053
-MeshCollider:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1652305050}
-  m_Material: {fileID: 0}
-  m_IncludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ExcludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_LayerOverridePriority: 0
-  m_IsTrigger: 0
-  m_ProvidesContacts: 0
-  m_Enabled: 1
-  serializedVersion: 5
-  m_Convex: 0
-  m_CookingOptions: 30
-  m_Mesh: {fileID: 0}
 --- !u!1 &1727375045
 GameObject:
   m_ObjectHideFlags: 0
@@ -747,10 +697,84 @@ MonoBehaviour:
   m_ShadowLayerMask: 1
   m_RenderingLayers: 1
   m_ShadowRenderingLayers: 1
+--- !u!1 &1842111928
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1842111929}
+  - component: {fileID: 1842111931}
+  - component: {fileID: 1842111930}
+  m_Layer: 0
+  m_Name: VoxelCollision
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1842111929
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1842111928}
+  serializedVersion: 2
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 1167274015}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1842111930
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1842111928}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 24fad7d8c25f8b94b8597110e543261a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelCollision
+  voxelWorld: {fileID: 1167274014}
+  trackTarget: {fileID: 12617762}
+  enableCollisionMeshing: 1
+  collisionRadius: 12
+  updateInterval: 0.4
+  movementThreshold: 2
+  debugDraw: 0
+--- !u!64 &1842111931
+MeshCollider:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1842111928}
+  m_Material: {fileID: 0}
+  m_IncludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ExcludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_LayerOverridePriority: 0
+  m_IsTrigger: 0
+  m_ProvidesContacts: 0
+  m_Enabled: 1
+  serializedVersion: 5
+  m_Convex: 0
+  m_CookingOptions: 30
+  m_Mesh: {fileID: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
   m_Roots:
   - {fileID: 12617762}
   - {fileID: 1727375047}
-  - {fileID: 1295750550}
+  - {fileID: 1167274015}

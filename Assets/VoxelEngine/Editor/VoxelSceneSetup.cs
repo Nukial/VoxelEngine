@@ -46,6 +46,7 @@ namespace VoxelEngine.Editor
             Undo.RegisterCreatedObjectUndo(worldGO, "Create Voxel World");
 
             var world = worldGO.AddComponent<VoxelWorld>();
+            var indirectRenderer = worldGO.AddComponent<VoxelIndirectInstanceRenderer>();
 
             // Set serialized fields via SerializedObject
             var so = new SerializedObject(world);
@@ -53,6 +54,7 @@ namespace VoxelEngine.Editor
             so.FindProperty("simulationShader").objectReferenceValue = simulation;
             so.FindProperty("brickMapShader").objectReferenceValue = brickMap;
             so.FindProperty("rayMarchShader").objectReferenceValue = rayMarchShader;
+            so.FindProperty("indirectInstanceRenderer").objectReferenceValue = indirectRenderer;
             so.FindProperty("worldSize").intValue = 128;
             so.FindProperty("voxelScale").floatValue = 0.25f;
             so.FindProperty("enableShadows").boolValue = true;
@@ -61,7 +63,9 @@ namespace VoxelEngine.Editor
             so.FindProperty("enableAdaptiveQuality").boolValue = true;
             so.FindProperty("movingRaySteps").intValue = 160;
             so.FindProperty("movingShadowSteps").intValue = 40;
-            so.FindProperty("disableShadowsWhileMoving").boolValue = true;
+            var reduceShadowsProp = so.FindProperty("reduceShadowsWhileMoving");
+            if (reduceShadowsProp != null)
+                reduceShadowsProp.boolValue = true;
             so.FindProperty("simulationTickRate").floatValue = 30f;
             so.FindProperty("simulationStepsPerFrame").intValue = 1;
             so.FindProperty("sunDirection").vector3Value = new Vector3(0.5f, 0.8f, 0.3f);
