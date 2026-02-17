@@ -44,7 +44,9 @@ namespace VoxelEngine
         [SerializeField] [Range(64, 512)] private int movingRaySteps = 192;
         [SerializeField] [Range(16, 256)] private int movingShadowSteps = 48;
         [SerializeField] [Min(0.001f)] private float cameraMotionThreshold = 0.02f;
-        [SerializeField] private bool disableShadowsWhileMoving = true;
+        [SerializeField] private bool reduceShadowsWhileMoving = true;
+        [SerializeField] [Range(0.1f, 0.5f)] private float movingShadowIntensity = 0.35f;
+        [SerializeField] [Range(2f, 15f)] private float qualityTransitionSpeed = 6f;
 
         [Header("Lighting")]
         [SerializeField] private Color ambientColor = new Color(0.15f, 0.18f, 0.25f);
@@ -88,6 +90,8 @@ namespace VoxelEngine
         private Vector3 _lastCameraPos;
         private bool _cameraPosInitialized;
         private float _simulationAccumulator;
+        private float _motionBlend; // 0=still, 1=moving, smoothly interpolated
+        private Quaternion _lastCameraRot;
 
         // Properties for external access
         public int WorldSize => worldSize;
@@ -128,6 +132,7 @@ namespace VoxelEngine
         private static readonly int PropWaterLevel = Shader.PropertyToID("_WaterLevel");
         private static readonly int PropMaxRenderDist = Shader.PropertyToID("_MaxRenderDist");
         private static readonly int PropCullMode = Shader.PropertyToID("_Cull");
+        private static readonly int PropShadowStrength = Shader.PropertyToID("_ShadowStrength");
 
         private void OnEnable()
         {
@@ -431,17 +436,27 @@ namespace VoxelEngine
         {
             if (_rayMarchMaterial == null) return;
 
+            // Smooth motion detection: interpolate between still/moving states
+            float rawMotion = GetCameraMotionIntensity();
+            float targetBlend = rawMotion > 0f ? Mathf.Clamp01(rawMotion) : 0f;
+            _motionBlend = Mathf.Lerp(_motionBlend, targetBlend,
+                Time.deltaTime * qualityTransitionSpeed);
+            // Snap to 0 when very close to avoid perpetual micro-blend
+            if (_motionBlend < 0.01f) _motionBlend = 0f;
+
             int runtimeMaxRaySteps = maxRaySteps;
             int runtimeMaxShadowSteps = maxShadowSteps;
-            bool isMoving = IsCameraMoving();
 
-            if (enableAdaptiveQuality && isMoving)
+            if (enableAdaptiveQuality && _motionBlend > 0f)
             {
-                runtimeMaxRaySteps = Mathf.Min(maxRaySteps, movingRaySteps);
-                runtimeMaxShadowSteps = Mathf.Min(maxShadowSteps, movingShadowSteps);
+                // Smoothly blend ray steps between full quality and moving quality
+                runtimeMaxRaySteps = Mathf.RoundToInt(
+                    Mathf.Lerp(maxRaySteps, Mathf.Min(maxRaySteps, movingRaySteps), _motionBlend));
+                runtimeMaxShadowSteps = Mathf.RoundToInt(
+                    Mathf.Lerp(maxShadowSteps, Mathf.Min(maxShadowSteps, movingShadowSteps), _motionBlend));
             }
 
-            // Dynamic cull mode: camera inside volume → Cull Back, outside → Cull Front
+            // Dynamic cull mode: camera inside volume -> Cull Back, outside -> Cull Front
             bool cameraInside = IsCameraInsideVolume();
             _rayMarchMaterial.SetFloat(PropCullMode, cameraInside ? 2f : 1f);
 
@@ -451,9 +466,7 @@ namespace VoxelEngine
             {
                 float distToCenter = Vector3.Distance(camera.transform.position,
                     WorldOrigin + Vector3.one * WorldExtent * 0.5f);
-                float halfExtent = WorldExtent * 0.5f;
                 float distRatio = Mathf.Clamp01(distToCenter / (WorldExtent * 1.5f));
-                // Farther = fewer steps
                 float qualityMult = Mathf.Lerp(1f, distanceQualityFactor, distRatio);
                 runtimeMaxRaySteps = Mathf.Max(64, Mathf.RoundToInt(runtimeMaxRaySteps * qualityMult));
                 runtimeMaxShadowSteps = Mathf.Max(16, Mathf.RoundToInt(runtimeMaxShadowSteps * qualityMult));
@@ -476,10 +489,20 @@ namespace VoxelEngine
             _rayMarchMaterial.SetFloat(PropFogDensity, fogDensity);
             _rayMarchMaterial.SetColor(PropFogColor, fogColor);
 
-            if (enableShadows && !(disableShadowsWhileMoving && isMoving))
+            // Shadow: always keep keyword ON, use _ShadowStrength for smooth transition
+            float shadowStr = 1f;
+            if (enableShadows)
+            {
                 _rayMarchMaterial.EnableKeyword("VOXEL_SHADOWS_ON");
+                if (reduceShadowsWhileMoving)
+                    shadowStr = Mathf.Lerp(1f, movingShadowIntensity, _motionBlend);
+            }
             else
+            {
                 _rayMarchMaterial.DisableKeyword("VOXEL_SHADOWS_ON");
+                shadowStr = 0f;
+            }
+            _rayMarchMaterial.SetFloat(PropShadowStrength, shadowStr);
         }
 
         /// <summary>
@@ -498,23 +521,38 @@ namespace VoxelEngine
                    local.z >= -margin && local.z <= ext + margin;
         }
 
-        private bool IsCameraMoving()
+        /// <summary>
+        /// Returns a 0-1 value indicating how intensely the camera is moving.
+        /// 0 = stationary, 1 = fast movement. Accounts for both position and rotation.
+        /// </summary>
+        private float GetCameraMotionIntensity()
         {
             var camera = Camera.main;
             if (camera == null)
-                return false;
+                return 0f;
 
             Vector3 currentPos = camera.transform.position;
+            Quaternion currentRot = camera.transform.rotation;
+
             if (!_cameraPosInitialized)
             {
                 _lastCameraPos = currentPos;
+                _lastCameraRot = currentRot;
                 _cameraPosInitialized = true;
-                return false;
+                return 0f;
             }
 
-            float sqrDist = (currentPos - _lastCameraPos).sqrMagnitude;
+            float posDelta = (currentPos - _lastCameraPos).magnitude;
+            float rotDelta = Quaternion.Angle(_lastCameraRot, currentRot);
+
             _lastCameraPos = currentPos;
-            return sqrDist > cameraMotionThreshold * cameraMotionThreshold;
+            _lastCameraRot = currentRot;
+
+            // Normalize: position delta weighted by threshold, rotation weighted by degrees
+            float posIntensity = Mathf.Clamp01(posDelta / Mathf.Max(cameraMotionThreshold * 5f, 0.01f));
+            float rotIntensity = Mathf.Clamp01(rotDelta / 3f); // 3 degrees = full intensity
+
+            return Mathf.Max(posIntensity, rotIntensity);
         }
 
         // =====================================================================

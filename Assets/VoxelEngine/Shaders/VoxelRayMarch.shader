@@ -14,6 +14,7 @@ Shader "VoxelEngine/RayMarch"
         _FogDensity ("Fog Density", Float) = 0.003
         _FogColor ("Fog Color", Color) = (0.6, 0.75, 0.9, 1)
         _MaxRenderDist ("Max Render Distance", Float) = 80
+        _ShadowStrength ("Shadow Strength", Range(0, 1)) = 1.0
         
         [Header(Culling)]
         [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull Mode", Float) = 1
@@ -74,6 +75,9 @@ Shader "VoxelEngine/RayMarch"
             
             // View distance
             float _MaxRenderDist;
+            
+            // Shadow blending
+            float _ShadowStrength;
             
             // --- Structures ---
             
@@ -144,6 +148,25 @@ Shader "VoxelEngine/RayMarch"
                 return _BrickMap[Flatten3D(brickPos, _BrickMapSize)] == 0;
             }
             
+            // Check a 2x2x2 super-brick (4 bricks along each axis combined)
+            // Returns true if all 8 child bricks are empty — allows larger jumps
+            bool IsSuperBrickEmpty(int3 superPos)
+            {
+                int3 baseBrick = superPos * 2;
+                [unroll]
+                for (int z = 0; z < 2; z++)
+                [unroll]
+                for (int y = 0; y < 2; y++)
+                [unroll]
+                for (int x = 0; x < 2; x++)
+                {
+                    int3 bp = baseBrick + int3(x, y, z);
+                    if (!IsBrickEmpty(bp))
+                        return false;
+                }
+                return true;
+            }
+            
             // --- World <-> Voxel Space Conversion ---
             
             float3 WorldToVoxel(float3 worldPos)
@@ -190,14 +213,20 @@ Shader "VoxelEngine/RayMarch"
                 int3 pos = int3(floor(startPos));
                 pos = clamp(pos, int3(0,0,0), int3(_WorldSize-1, _WorldSize-1, _WorldSize-1));
                 
-                // Step direction
-                int3 stepDir = int3(sign(dir));
+                // Step direction (set from safeDir below to avoid zero-step axes)
+                int3 stepDir = int3(0, 0, 0);
                 
                 // Prevent division by zero
                 float3 safeDir = dir;
                 safeDir.x = abs(safeDir.x) < 1e-8 ? (safeDir.x >= 0 ? 1e-8 : -1e-8) : safeDir.x;
                 safeDir.y = abs(safeDir.y) < 1e-8 ? (safeDir.y >= 0 ? 1e-8 : -1e-8) : safeDir.y;
                 safeDir.z = abs(safeDir.z) < 1e-8 ? (safeDir.z >= 0 ? 1e-8 : -1e-8) : safeDir.z;
+
+                stepDir = int3(
+                    safeDir.x >= 0 ? 1 : -1,
+                    safeDir.y >= 0 ? 1 : -1,
+                    safeDir.z >= 0 ? 1 : -1
+                );
                 
                 float3 invDir = 1.0 / safeDir;
                 
@@ -225,9 +254,37 @@ Shader "VoxelEngine/RayMarch"
                     if (currentT > tNear + maxVoxelDist)
                         break;
                     
-                    // Brick map acceleration
+                    // Hierarchical empty-space skip: try super-brick (2x2x2 bricks) first
                     int3 brickPos = pos / _BrickSize;
-                    if (IsBrickEmpty(brickPos))
+                    int3 superPos = brickPos / 2;
+                    int superBrickVoxelSize = _BrickSize * 2;
+                    
+                    if (IsSuperBrickEmpty(superPos))
+                    {
+                        // Skip entire 2x2x2 super-brick region
+                        float3 sbMinF = float3(superPos * superBrickVoxelSize);
+                        float3 sbMaxF = sbMinF + float(superBrickVoxelSize);
+                        
+                        float3 tExit0 = (sbMinF - origin) * invDir;
+                        float3 tExit1 = (sbMaxF - origin) * invDir;
+                        float3 tFarAxis = max(tExit0, tExit1);
+                        float tSBExit = min(min(tFarAxis.x, tFarAxis.y), tFarAxis.z);
+                        
+                        if (tSBExit == tFarAxis.x) normal = float3(-stepDir.x, 0, 0);
+                        else if (tSBExit == tFarAxis.y) normal = float3(0, -stepDir.y, 0);
+                        else normal = float3(0, 0, -stepDir.z);
+                        
+                        float3 jumpPos = origin + safeDir * (tSBExit + 0.001);
+                        pos = int3(floor(jumpPos));
+                        
+                        nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
+                        nextBound.y = stepDir.y > 0 ? float(pos.y + 1) : float(pos.y);
+                        nextBound.z = stepDir.z > 0 ? float(pos.z + 1) : float(pos.z);
+                        tMax = (nextBound - origin) * invDir;
+                        
+                        continue;
+                    }
+                    else if (IsBrickEmpty(brickPos))
                     {
                         // Skip entire brick - compute ray exit from this brick
                         float3 brickMinF = float3(brickPos * _BrickSize);
@@ -247,7 +304,6 @@ Shader "VoxelEngine/RayMarch"
                         float tJump = tBrickExit + 0.001;
                         float3 jumpPos = origin + safeDir * tJump;
                         pos = int3(floor(jumpPos));
-                        pos = clamp(pos, int3(0,0,0), int3(_WorldSize-1, _WorldSize-1, _WorldSize-1));
                         
                         // Recompute tMax from new position
                         nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
@@ -326,12 +382,18 @@ Shader "VoxelEngine/RayMarch"
             bool CastShadowRay(float3 origin, float3 dir, int maxSteps)
             {
                 int3 pos = int3(floor(origin));
-                int3 stepDir = int3(sign(dir));
+                int3 stepDir = int3(0, 0, 0);
                 
                 float3 safeDir = dir;
                 safeDir.x = abs(safeDir.x) < 1e-8 ? 1e-8 : safeDir.x;
                 safeDir.y = abs(safeDir.y) < 1e-8 ? 1e-8 : safeDir.y;
                 safeDir.z = abs(safeDir.z) < 1e-8 ? 1e-8 : safeDir.z;
+
+                stepDir = int3(
+                    safeDir.x >= 0 ? 1 : -1,
+                    safeDir.y >= 0 ? 1 : -1,
+                    safeDir.z >= 0 ? 1 : -1
+                );
                 
                 float3 invDir = 1.0 / safeDir;
                 float3 tDelta = abs(invDir);
@@ -355,9 +417,30 @@ Shader "VoxelEngine/RayMarch"
                     if (shadowT > maxShadowVoxelDist)
                         return false;
                     
-                    // Brick map skip for shadow rays too
+                    // Super-brick skip for shadow rays too
                     int3 brickPos = pos / _BrickSize;
-                    if (IsBrickEmpty(brickPos))
+                    int3 sBrickPos = brickPos / 2;
+                    int sBrickVS = _BrickSize * 2;
+                    
+                    if (IsSuperBrickEmpty(sBrickPos))
+                    {
+                        float3 sbMin = float3(sBrickPos * sBrickVS);
+                        float3 sbMax = sbMin + float(sBrickVS);
+                        float3 tE0 = (sbMin - origin) * invDir;
+                        float3 tE1 = (sbMax - origin) * invDir;
+                        float3 tFA = max(tE0, tE1);
+                        float tSBE = min(min(tFA.x, tFA.y), tFA.z);
+                        
+                        float3 jumpPos = origin + safeDir * (tSBE + 0.001);
+                        pos = int3(floor(jumpPos));
+                        
+                        nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
+                        nextBound.y = stepDir.y > 0 ? float(pos.y + 1) : float(pos.y);
+                        nextBound.z = stepDir.z > 0 ? float(pos.z + 1) : float(pos.z);
+                        tMax = (nextBound - origin) * invDir;
+                        continue;
+                    }
+                    else if (IsBrickEmpty(brickPos))
                     {
                         float3 brickMinF = float3(brickPos * _BrickSize);
                         float3 brickMaxF = brickMinF + float(_BrickSize);
@@ -413,7 +496,15 @@ Shader "VoxelEngine/RayMarch"
                 RayHit hit = RayMarchVoxels(voxelOrigin, voxelDir, _MaxSteps);
                 
                 if (!hit.hit)
-                    discard;
+                {
+                    // Output fog/sky color for miss rays instead of discard.
+                    // This avoids leaving holes in the volume that cause
+                    // depth-buffer issues and gives a cleaner look.
+                    output.color = _FogColor;
+                    // Write far depth so it doesn't occlude anything
+                    output.depth = 0.0; // far plane in reversed-Z
+                    return output;
+                }
                 
                 // --- Shading ---
                 uint matId = GetMaterialId(hit.voxelData);
@@ -445,13 +536,17 @@ Shader "VoxelEngine/RayMarch"
                                       (matId == MAT_IRON || matId == MAT_GOLD) ? 0.4 : 0.08;
                 float spec = pow(NdotH, _SpecularPower) * specIntensity;
                 
-                // Shadow ray
+                // Shadow ray - use _ShadowStrength for smooth transition
                 float shadowFactor = 1.0;
                 #ifdef VOXEL_SHADOWS_ON
                 {
                     float3 shadowOrigin = float3(hit.voxelPos) + 0.5 + hit.normal * 1.01;
                     if (CastShadowRay(shadowOrigin, L, _MaxShadowSteps))
-                        shadowFactor = 0.25;
+                    {
+                        // Blend shadow intensity based on _ShadowStrength
+                        float shadowDarkness = lerp(1.0, 0.25, _ShadowStrength);
+                        shadowFactor = shadowDarkness;
+                    }
                 }
                 #endif
                 
@@ -592,6 +687,18 @@ Shader "VoxelEngine/RayMarch"
                 return _BrickMap[Flatten3D(bp, _BrickMapSize)] == 0;
             }
             
+            bool IsSuperBrickEmpty(int3 sbp)
+            {
+                for (int dz = 0; dz < 2; dz++)
+                for (int dy = 0; dy < 2; dy++)
+                for (int dx = 0; dx < 2; dx++)
+                {
+                    int3 bp = sbp * 2 + int3(dx, dy, dz);
+                    if (!IsBrickEmpty(bp)) return false;
+                }
+                return true;
+            }
+            
             bool IntersectAABB_Depth(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tN, out float tF)
             {
                 float3 inv=1.0/rd;
@@ -622,12 +729,17 @@ Shader "VoxelEngine/RayMarch"
                 
                 float3 startPos = clamp(origin + dir * tNear, 0.001, (float)_WorldSize - 0.001);
                 int3 pos = clamp(int3(floor(startPos)), int3(0,0,0), int3(_WorldSize-1,_WorldSize-1,_WorldSize-1));
-                int3 stepDir = int3(sign(dir));
+                int3 stepDir = int3(0, 0, 0);
                 
                 float3 safeDir = dir;
                 safeDir.x = abs(safeDir.x)<1e-8 ? 1e-8 : safeDir.x;
                 safeDir.y = abs(safeDir.y)<1e-8 ? 1e-8 : safeDir.y;
                 safeDir.z = abs(safeDir.z)<1e-8 ? 1e-8 : safeDir.z;
+                stepDir = int3(
+                    safeDir.x >= 0 ? 1 : -1,
+                    safeDir.y >= 0 ? 1 : -1,
+                    safeDir.z >= 0 ? 1 : -1
+                );
                 float3 invDir = 1.0/safeDir;
                 float3 tDelta = abs(invDir);
                 
@@ -647,13 +759,32 @@ Shader "VoxelEngine/RayMarch"
                     if (curT > tNear + maxVoxelDist) break;
                     
                     int3 bp = pos/_BrickSize;
-                    if (IsBrickEmpty(bp))
+                    int3 sbp = bp / 2;
+                    int sBrickVS = _BrickSize * 2;
+                    
+                    if (IsSuperBrickEmpty(sbp))
+                    {
+                        float3 sbMin = float3(sbp * sBrickVS);
+                        float3 sbMax = sbMin + float(sBrickVS);
+                        float3 tE0 = (sbMin - origin) * invDir;
+                        float3 tE1 = (sbMax - origin) * invDir;
+                        float3 tFA = max(tE0, tE1);
+                        float tSBE = min(min(tFA.x, tFA.y), tFA.z);
+                        float3 jp = origin + safeDir * (tSBE + 0.001);
+                        pos = int3(floor(jp));
+                        nextBound.x = stepDir.x>0 ? float(pos.x+1) : float(pos.x);
+                        nextBound.y = stepDir.y>0 ? float(pos.y+1) : float(pos.y);
+                        nextBound.z = stepDir.z>0 ? float(pos.z+1) : float(pos.z);
+                        tMax = (nextBound - origin) * invDir;
+                        continue;
+                    }
+                    else if (IsBrickEmpty(bp))
                     {
                         float3 bMinF=float3(bp*_BrickSize), bMaxF=bMinF+float(_BrickSize);
                         float3 te0=(bMinF-origin)*invDir, te1=(bMaxF-origin)*invDir;
                         float tBE=min(min(max(te0.x,te1.x),max(te0.y,te1.y)),max(te0.z,te1.z));
                         float3 jp=origin+safeDir*(tBE+0.001);
-                        pos=clamp(int3(floor(jp)),int3(0,0,0),int3(_WorldSize-1,_WorldSize-1,_WorldSize-1));
+                        pos=int3(floor(jp));
                         nextBound.x=stepDir.x>0?float(pos.x+1):float(pos.x);
                         nextBound.y=stepDir.y>0?float(pos.y+1):float(pos.y);
                         nextBound.z=stepDir.z>0?float(pos.z+1):float(pos.z);
