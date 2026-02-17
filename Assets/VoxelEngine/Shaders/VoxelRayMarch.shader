@@ -13,6 +13,10 @@ Shader "VoxelEngine/RayMarch"
         _MaxShadowSteps ("Max Shadow Steps", Int) = 128
         _FogDensity ("Fog Density", Float) = 0.003
         _FogColor ("Fog Color", Color) = (0.6, 0.75, 0.9, 1)
+        _MaxRenderDist ("Max Render Distance", Float) = 80
+        
+        [Header(Culling)]
+        [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull Mode", Float) = 1
     }
     
     SubShader
@@ -29,7 +33,7 @@ Shader "VoxelEngine/RayMarch"
             Name "VoxelRayMarch"
             Tags { "LightMode" = "UniversalForward" }
             
-            Cull Front
+            Cull [_Cull]
             ZWrite On
             ZTest LEqual
             
@@ -67,6 +71,9 @@ Shader "VoxelEngine/RayMarch"
             // Fog
             float _FogDensity;
             float4 _FogColor;
+            
+            // View distance
+            float _MaxRenderDist;
             
             // --- Structures ---
             
@@ -170,6 +177,11 @@ Shader "VoxelEngine/RayMarch"
                 
                 tNear = max(tNear, 0.0001);
                 
+                // Max traversal distance in voxel space
+                float maxVoxelDist = _MaxRenderDist / max(_VoxelScale, 0.001);
+                // Clamp tFar to not exceed render distance from entry
+                tFar = min(tFar, tNear + maxVoxelDist);
+                
                 // Entry point
                 float3 startPos = origin + dir * tNear;
                 startPos = clamp(startPos, 0.001, (float)_WorldSize - 0.001);
@@ -206,6 +218,11 @@ Shader "VoxelEngine/RayMarch"
                 {
                     // Bounds check
                     if (any(pos < 0) || any(pos >= _WorldSize))
+                        break;
+                    
+                    // Early termination: stop if ray has traveled beyond max render distance
+                    float currentT = min(min(tMax.x, tMax.y), tMax.z);
+                    if (currentT > tNear + maxVoxelDist)
                         break;
                     
                     // Brick map acceleration
@@ -319,6 +336,9 @@ Shader "VoxelEngine/RayMarch"
                 float3 invDir = 1.0 / safeDir;
                 float3 tDelta = abs(invDir);
                 
+                // Limit shadow rays to a shorter distance for performance
+                float maxShadowVoxelDist = min(_MaxRenderDist / max(_VoxelScale, 0.001) * 0.5, 64.0);
+                
                 float3 nextBound;
                 nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
                 nextBound.y = stepDir.y > 0 ? float(pos.y + 1) : float(pos.y);
@@ -329,6 +349,11 @@ Shader "VoxelEngine/RayMarch"
                 {
                     if (any(pos < 0) || any(pos >= _WorldSize))
                         return false; // Escaped to sky
+                    
+                    // Early termination for shadow distance
+                    float shadowT = min(min(tMax.x, tMax.y), tMax.z);
+                    if (shadowT > maxShadowVoxelDist)
+                        return false;
                     
                     // Brick map skip for shadow rays too
                     int3 brickPos = pos / _BrickSize;
@@ -472,6 +497,11 @@ Shader "VoxelEngine/RayMarch"
                 float3 hitWorldPos = VoxelToWorld(float3(hit.voxelPos) + 0.5);
                 float dist = distance(camPos, hitWorldPos);
                 float fogFactor = 1.0 - exp(-dist * _FogDensity);
+                
+                // Render distance fade: smooth transition to fog at max distance
+                float distFade = saturate((dist - _MaxRenderDist * 0.75) / (_MaxRenderDist * 0.25));
+                fogFactor = max(fogFactor, distFade);
+                
                 finalColor = lerp(finalColor, _FogColor.rgb, saturate(fogFactor));
                 
                 // HDR output
@@ -493,7 +523,7 @@ Shader "VoxelEngine/RayMarch"
             Name "DepthOnly"
             Tags { "LightMode" = "DepthOnly" }
             
-            Cull Front
+            Cull [_Cull]
             ZWrite On
             ColorMask 0
             
@@ -514,6 +544,7 @@ Shader "VoxelEngine/RayMarch"
             float _VoxelScale;
             float3 _WorldOrigin;
             int _MaxSteps;
+            float _MaxRenderDist;
             
             struct Attributes { float4 positionOS : POSITION; };
             struct Varyings 
@@ -585,6 +616,10 @@ Shader "VoxelEngine/RayMarch"
                     return result;
                 tNear = max(tNear, 0.0001);
                 
+                // Max traversal distance for early termination
+                float maxVoxelDist = _MaxRenderDist / max(_VoxelScale, 0.001);
+                tFar = min(tFar, tNear + maxVoxelDist);
+                
                 float3 startPos = clamp(origin + dir * tNear, 0.001, (float)_WorldSize - 0.001);
                 int3 pos = clamp(int3(floor(startPos)), int3(0,0,0), int3(_WorldSize-1,_WorldSize-1,_WorldSize-1));
                 int3 stepDir = int3(sign(dir));
@@ -606,6 +641,10 @@ Shader "VoxelEngine/RayMarch"
                 for (int i=0; i<maxSteps; i++)
                 {
                     if (any(pos<0)||any(pos>=_WorldSize)) break;
+                    
+                    // Early termination based on distance
+                    float curT = min(min(tMax.x, tMax.y), tMax.z);
+                    if (curT > tNear + maxVoxelDist) break;
                     
                     int3 bp = pos/_BrickSize;
                     if (IsBrickEmpty(bp))

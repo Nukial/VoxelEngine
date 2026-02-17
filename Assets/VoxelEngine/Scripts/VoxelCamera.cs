@@ -28,6 +28,12 @@ namespace VoxelEngine
             _yaw = transform.eulerAngles.y;
             _pitch = transform.eulerAngles.x;
             LockCursor(true);
+
+            // Set near clip plane very small so terrain is visible when camera
+            // is very close to voxel surfaces.
+            var cam = GetComponent<Camera>();
+            if (cam != null)
+                cam.nearClipPlane = 0.05f;
         }
 
         private void Update()

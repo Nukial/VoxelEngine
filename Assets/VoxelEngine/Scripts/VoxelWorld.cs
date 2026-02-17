@@ -34,6 +34,11 @@ namespace VoxelEngine
         [SerializeField] private int maxShadowSteps = 128;
         [SerializeField] private bool enableShadows = true;
 
+        [Header("View Distance")]
+        [SerializeField] private float maxRenderDistance = 80f;
+        [SerializeField] [Range(0.3f, 1.0f)] private float distanceQualityFactor = 0.6f;
+        [SerializeField] private float renderDistanceFadeRatio = 0.8f;
+
         [Header("Adaptive Quality")]
         [SerializeField] private bool enableAdaptiveQuality = true;
         [SerializeField] [Range(64, 512)] private int movingRaySteps = 192;
@@ -121,6 +126,8 @@ namespace VoxelEngine
         private static readonly int PropCaveScale = Shader.PropertyToID("_CaveScale");
         private static readonly int PropCaveThreshold = Shader.PropertyToID("_CaveThreshold");
         private static readonly int PropWaterLevel = Shader.PropertyToID("_WaterLevel");
+        private static readonly int PropMaxRenderDist = Shader.PropertyToID("_MaxRenderDist");
+        private static readonly int PropCullMode = Shader.PropertyToID("_Cull");
 
         private void OnEnable()
         {
@@ -289,23 +296,28 @@ namespace VoxelEngine
 
         private Mesh CreateBoxMesh()
         {
-            // Unit cube from (0,0,0) to (1,1,1)
+            // Unit cube with margin to prevent near-plane clipping when camera
+            // is near volume edges. Extends slightly beyond [0,1] on each side.
             var mesh = new Mesh();
             mesh.name = "VoxelVolume";
 
+            const float m = 0.03f; // margin
+            float lo = -m;
+            float hi = 1f + m;
+
             Vector3[] verts = {
                 // Front face
-                new Vector3(0, 0, 1), new Vector3(1, 0, 1), new Vector3(1, 1, 1), new Vector3(0, 1, 1),
+                new Vector3(lo, lo, hi), new Vector3(hi, lo, hi), new Vector3(hi, hi, hi), new Vector3(lo, hi, hi),
                 // Back face
-                new Vector3(1, 0, 0), new Vector3(0, 0, 0), new Vector3(0, 1, 0), new Vector3(1, 1, 0),
+                new Vector3(hi, lo, lo), new Vector3(lo, lo, lo), new Vector3(lo, hi, lo), new Vector3(hi, hi, lo),
                 // Top face
-                new Vector3(0, 1, 1), new Vector3(1, 1, 1), new Vector3(1, 1, 0), new Vector3(0, 1, 0),
+                new Vector3(lo, hi, hi), new Vector3(hi, hi, hi), new Vector3(hi, hi, lo), new Vector3(lo, hi, lo),
                 // Bottom face
-                new Vector3(0, 0, 0), new Vector3(1, 0, 0), new Vector3(1, 0, 1), new Vector3(0, 0, 1),
+                new Vector3(lo, lo, lo), new Vector3(hi, lo, lo), new Vector3(hi, lo, hi), new Vector3(lo, lo, hi),
                 // Right face
-                new Vector3(1, 0, 1), new Vector3(1, 0, 0), new Vector3(1, 1, 0), new Vector3(1, 1, 1),
+                new Vector3(hi, lo, hi), new Vector3(hi, lo, lo), new Vector3(hi, hi, lo), new Vector3(hi, hi, hi),
                 // Left face
-                new Vector3(0, 0, 0), new Vector3(0, 0, 1), new Vector3(0, 1, 1), new Vector3(0, 1, 0),
+                new Vector3(lo, lo, lo), new Vector3(lo, lo, hi), new Vector3(lo, hi, hi), new Vector3(lo, hi, lo),
             };
 
             int[] tris = {
@@ -429,6 +441,24 @@ namespace VoxelEngine
                 runtimeMaxShadowSteps = Mathf.Min(maxShadowSteps, movingShadowSteps);
             }
 
+            // Dynamic cull mode: camera inside volume → Cull Back, outside → Cull Front
+            bool cameraInside = IsCameraInsideVolume();
+            _rayMarchMaterial.SetFloat(PropCullMode, cameraInside ? 2f : 1f);
+
+            // Distance-based quality scaling
+            var camera = Camera.main;
+            if (camera != null)
+            {
+                float distToCenter = Vector3.Distance(camera.transform.position,
+                    WorldOrigin + Vector3.one * WorldExtent * 0.5f);
+                float halfExtent = WorldExtent * 0.5f;
+                float distRatio = Mathf.Clamp01(distToCenter / (WorldExtent * 1.5f));
+                // Farther = fewer steps
+                float qualityMult = Mathf.Lerp(1f, distanceQualityFactor, distRatio);
+                runtimeMaxRaySteps = Mathf.Max(64, Mathf.RoundToInt(runtimeMaxRaySteps * qualityMult));
+                runtimeMaxShadowSteps = Mathf.Max(16, Mathf.RoundToInt(runtimeMaxShadowSteps * qualityMult));
+            }
+
             _rayMarchMaterial.SetBuffer(PropVoxelBuffer, ReadBuffer);
             _rayMarchMaterial.SetBuffer(PropBrickMap, _brickMapBuffer);
             _rayMarchMaterial.SetInt(PropWorldSize, worldSize);
@@ -438,6 +468,7 @@ namespace VoxelEngine
             _rayMarchMaterial.SetVector(PropWorldOrigin, WorldOrigin);
             _rayMarchMaterial.SetInt(PropMaxSteps, runtimeMaxRaySteps);
             _rayMarchMaterial.SetInt(PropMaxShadowSteps, runtimeMaxShadowSteps);
+            _rayMarchMaterial.SetFloat(PropMaxRenderDist, maxRenderDistance);
             _rayMarchMaterial.SetVector(PropSunDir, sunDirection.normalized);
             _rayMarchMaterial.SetColor(PropSunColor, sunColor);
             _rayMarchMaterial.SetColor(PropAmbientColor, ambientColor);
@@ -449,6 +480,22 @@ namespace VoxelEngine
                 _rayMarchMaterial.EnableKeyword("VOXEL_SHADOWS_ON");
             else
                 _rayMarchMaterial.DisableKeyword("VOXEL_SHADOWS_ON");
+        }
+
+        /// <summary>
+        /// Check if the main camera is inside the voxel volume bounding box.
+        /// Used to switch cull mode for correct rendering.
+        /// </summary>
+        private bool IsCameraInsideVolume()
+        {
+            var cam = Camera.main;
+            if (cam == null) return false;
+            Vector3 local = cam.transform.position - WorldOrigin;
+            float ext = WorldExtent;
+            float margin = 0.5f; // small margin for smooth transition
+            return local.x >= -margin && local.x <= ext + margin &&
+                   local.y >= -margin && local.y <= ext + margin &&
+                   local.z >= -margin && local.z <= ext + margin;
         }
 
         private bool IsCameraMoving()
