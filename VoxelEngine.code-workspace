@@ -14,7 +14,11 @@
 		"dotnet.defaultSolution": "VoxelEngine.slnx",
 		"chat.tools.terminal.autoApprove": {
 			"git -C \"c:/Users/luany/Project/VoxelEngine\"": true,
-			"git ls-remote": true
+			"git ls-remote": true,
+			"/^for %F in \\(Library\\\\SourceAssetDB Assets\\\\VoxelEngine\\\\Shaders\\\\VoxelSimulation\\.compute\\) do @echo %~fF & dir /T:W \"%F\" \\| findstr /R \"\\[0-9\\]\\[0-9\\]/\\[0-9\\]\\[0-9\\]/\\[0-9\\]\\[0-9\\]\\[0-9\\]\\[0-9\\]\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			}
 		}
 	}
 }

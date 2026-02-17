@@ -405,12 +405,24 @@ MonoBehaviour:
   terrainScale: 0.02
   caveScale: 0.06
   caveThreshold: 0.72
-  seed: 42
+  seed: 3536.7197
   simulationShader: {fileID: 7200000, guid: 7b7953b379bd04443b3dacca0023703e, type: 3}
   brickMapShader: {fileID: 7200000, guid: 540db8e242e9b5744a1270b882c15b6a, type: 3}
   enableSimulation: 1
   simulationStepsPerFrame: 1
   simulationTickRate: 30
+  fireProfile: 1
+  fireSpreadNeighborTemp: 10
+  woodCharTemp: 13
+  leafBurnTemp: 10
+  coalBurnoutTemp: 15
+  snowMeltTemp: 5
+  waterEvapTemp: 13
+  burningLightTemp: 10
+  heatRiseRate: 1
+  coolRate: 1
+  heatSinkExtraCool: 1
+  coalBurnoutChanceDiv: 12
   rayMarchShader: {fileID: 4800000, guid: 2f883620e87280343a3f34667b86ec13, type: 3}
   indirectInstanceRenderer: {fileID: 1167274013}
   maxRaySteps: 320

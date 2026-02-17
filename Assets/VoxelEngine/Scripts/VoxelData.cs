@@ -178,14 +178,18 @@ namespace VoxelEngine
         public static uint SetTemperature(uint voxel, uint temp)
         {
             byte aux = GetAuxData(voxel);
-            aux = (byte)((aux & 0xF0) | (temp & 0xF));
+            byte preservedHigh = (byte)(aux & 0xF0);
+            byte newLow = (byte)(temp & 0x0Fu);
+            aux = (byte)(preservedHigh | newLow);
             return Pack(GetMaterialId(voxel), GetColor565(voxel), aux);
         }
 
         public static uint SetLightLevel(uint voxel, uint light)
         {
             byte aux = GetAuxData(voxel);
-            aux = (byte)((aux & 0x0F) | ((light & 0xF) << 4));
+            byte preservedLow = (byte)(aux & 0x0F);
+            byte newHigh = (byte)((light & 0x0Fu) << 4);
+            aux = (byte)(preservedLow | newHigh);
             return Pack(GetMaterialId(voxel), GetColor565(voxel), aux);
         }
 

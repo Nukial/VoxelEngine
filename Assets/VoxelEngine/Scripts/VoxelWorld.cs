@@ -10,6 +10,13 @@ namespace VoxelEngine
     /// </summary>
     public class VoxelWorld : MonoBehaviour
     {
+        private enum FireSimulationProfile
+        {
+            Fast,
+            Realistic,
+            Custom
+        }
+
         private struct VoxelWrite
         {
             public int index;
@@ -34,6 +41,20 @@ namespace VoxelEngine
         [SerializeField] private bool enableSimulation = true;
         [SerializeField] [Range(1, 8)] private int simulationStepsPerFrame = 1;
         [SerializeField] [Range(5f, 120f)] private float simulationTickRate = 30f;
+
+        [Header("Fire Simulation")]
+        [SerializeField] private FireSimulationProfile fireProfile = FireSimulationProfile.Realistic;
+        [SerializeField] [Range(4, 14)] private int fireSpreadNeighborTemp = 10;
+        [SerializeField] [Range(6, 15)] private int woodCharTemp = 13;
+        [SerializeField] [Range(6, 15)] private int leafBurnTemp = 10;
+        [SerializeField] [Range(8, 15)] private int coalBurnoutTemp = 15;
+        [SerializeField] [Range(2, 8)] private int snowMeltTemp = 5;
+        [SerializeField] [Range(8, 15)] private int waterEvapTemp = 13;
+        [SerializeField] [Range(6, 15)] private int burningLightTemp = 10;
+        [SerializeField] [Range(1, 3)] private int heatRiseRate = 1;
+        [SerializeField] [Range(1, 3)] private int coolRate = 1;
+        [SerializeField] [Range(0, 2)] private int heatSinkExtraCool = 1;
+        [SerializeField] [Range(2, 20)] private int coalBurnoutChanceDiv = 12;
 
         [Header("Rendering")]
         [SerializeField] private Shader rayMarchShader;
@@ -150,6 +171,17 @@ namespace VoxelEngine
         private static readonly int PropMaxRenderDist = Shader.PropertyToID("_MaxRenderDist");
         private static readonly int PropCullMode = Shader.PropertyToID("_Cull");
         private static readonly int PropShadowStrength = Shader.PropertyToID("_ShadowStrength");
+        private static readonly int PropFireSpreadNeighborTemp = Shader.PropertyToID("_FireSpreadNeighborTemp");
+        private static readonly int PropWoodCharTemp = Shader.PropertyToID("_WoodCharTemp");
+        private static readonly int PropLeafBurnTemp = Shader.PropertyToID("_LeafBurnTemp");
+        private static readonly int PropCoalBurnoutTemp = Shader.PropertyToID("_CoalBurnoutTemp");
+        private static readonly int PropSnowMeltTemp = Shader.PropertyToID("_SnowMeltTemp");
+        private static readonly int PropWaterEvapTemp = Shader.PropertyToID("_WaterEvapTemp");
+        private static readonly int PropBurningLightTemp = Shader.PropertyToID("_BurningLightTemp");
+        private static readonly int PropHeatRiseRate = Shader.PropertyToID("_HeatRiseRate");
+        private static readonly int PropCoolRate = Shader.PropertyToID("_CoolRate");
+        private static readonly int PropHeatSinkExtraCool = Shader.PropertyToID("_HeatSinkExtraCool");
+        private static readonly int PropCoalBurnoutChanceDiv = Shader.PropertyToID("_CoalBurnoutChanceDiv");
 
         private void OnEnable()
         {
@@ -425,15 +457,78 @@ namespace VoxelEngine
             int simGroups = Mathf.CeilToInt(worldSize / 4f);
             simulationShader.Dispatch(_simKernel, simGroups, simGroups, simGroups);
 
-            // Phase 3: Propagate heat and light on the write buffer
-            simulationShader.SetBuffer(_heatLightKernel, PropWriteBuffer, writeBuf);
+            // Phase 3: Clear read buffer to reuse it as heat/light destination
+            simulationShader.SetBuffer(_simClearKernel, PropWriteBuffer, readBuf);
+            simulationShader.SetInt(PropWorldSize, worldSize);
+            simulationShader.Dispatch(_simClearKernel, clearGroups, 1, 1);
+
+            // Phase 4: Propagate heat/light with stable read->write buffers
+            // Read from simulation output (writeBuf), write final state into readBuf.
+            simulationShader.SetBuffer(_heatLightKernel, PropReadBuffer, writeBuf);
+            simulationShader.SetBuffer(_heatLightKernel, PropWriteBuffer, readBuf);
             simulationShader.SetInt(PropWorldSize, worldSize);
             simulationShader.SetInt(PropFrameCount, (int)_frameCount);
+            ApplyFireSimulationTuning(_heatLightKernel);
             simulationShader.Dispatch(_heatLightKernel, simGroups, simGroups, simGroups);
 
-            // Swap buffers
-            _pingPong = !_pingPong;
+            // Do not swap here: final state already written back to ReadBuffer.
             _simStep++;
+        }
+
+        private void ApplyFireSimulationTuning(int kernel)
+        {
+            int spreadTemp = fireSpreadNeighborTemp;
+            int woodTemp = woodCharTemp;
+            int leafTemp = leafBurnTemp;
+            int coalTemp = coalBurnoutTemp;
+            int snowTemp = snowMeltTemp;
+            int waterTemp = waterEvapTemp;
+            int burnLightTemp = burningLightTemp;
+            int riseRate = heatRiseRate;
+            int decayRate = coolRate;
+            int sinkCool = heatSinkExtraCool;
+            int burnoutDiv = coalBurnoutChanceDiv;
+
+            if (fireProfile == FireSimulationProfile.Fast)
+            {
+                spreadTemp = 7;
+                woodTemp = 10;
+                leafTemp = 8;
+                coalTemp = 13;
+                snowTemp = 3;
+                waterTemp = 10;
+                burnLightTemp = 8;
+                riseRate = 2;
+                decayRate = 1;
+                sinkCool = 0;
+                burnoutDiv = 5;
+            }
+            else if (fireProfile == FireSimulationProfile.Realistic)
+            {
+                spreadTemp = 10;
+                woodTemp = 13;
+                leafTemp = 10;
+                coalTemp = 15;
+                snowTemp = 5;
+                waterTemp = 13;
+                burnLightTemp = 10;
+                riseRate = 1;
+                decayRate = 1;
+                sinkCool = 1;
+                burnoutDiv = 12;
+            }
+
+            simulationShader.SetInt(PropFireSpreadNeighborTemp, Mathf.Clamp(spreadTemp, 4, 15));
+            simulationShader.SetInt(PropWoodCharTemp, Mathf.Clamp(woodTemp, 6, 15));
+            simulationShader.SetInt(PropLeafBurnTemp, Mathf.Clamp(leafTemp, 6, 15));
+            simulationShader.SetInt(PropCoalBurnoutTemp, Mathf.Clamp(coalTemp, 8, 15));
+            simulationShader.SetInt(PropSnowMeltTemp, Mathf.Clamp(snowTemp, 2, 8));
+            simulationShader.SetInt(PropWaterEvapTemp, Mathf.Clamp(waterTemp, 8, 15));
+            simulationShader.SetInt(PropBurningLightTemp, Mathf.Clamp(burnLightTemp, 6, 15));
+            simulationShader.SetInt(PropHeatRiseRate, Mathf.Clamp(riseRate, 1, 3));
+            simulationShader.SetInt(PropCoolRate, Mathf.Clamp(decayRate, 1, 3));
+            simulationShader.SetInt(PropHeatSinkExtraCool, Mathf.Clamp(sinkCool, 0, 2));
+            simulationShader.SetInt(PropCoalBurnoutChanceDiv, Mathf.Max(2, burnoutDiv));
         }
 
         // =====================================================================
