@@ -92,6 +92,7 @@ namespace VoxelEngine
         private int _simKernel;
         private int _simClearKernel;
         private int _brickMapKernel;
+        private int _heatLightKernel;
 
         // Frame counter for simulation randomness
         private uint _frameCount;
@@ -403,6 +404,7 @@ namespace VoxelEngine
 
             _simClearKernel = simulationShader.FindKernel("ClearWriteBuffer");
             _simKernel = simulationShader.FindKernel("SimulateVoxels");
+            _heatLightKernel = simulationShader.FindKernel("PropagateHeatAndLight");
 
             var readBuf = ReadBuffer;
             var writeBuf = WriteBuffer;
@@ -413,7 +415,7 @@ namespace VoxelEngine
             int clearGroups = Mathf.CeilToInt(TotalVoxels / 256f);
             simulationShader.Dispatch(_simClearKernel, clearGroups, 1, 1);
 
-            // Phase 2: Simulate
+            // Phase 2: Simulate (movement + chemical reactions)
             simulationShader.SetBuffer(_simKernel, PropReadBuffer, readBuf);
             simulationShader.SetBuffer(_simKernel, PropWriteBuffer, writeBuf);
             simulationShader.SetInt(PropWorldSize, worldSize);
@@ -422,6 +424,12 @@ namespace VoxelEngine
 
             int simGroups = Mathf.CeilToInt(worldSize / 4f);
             simulationShader.Dispatch(_simKernel, simGroups, simGroups, simGroups);
+
+            // Phase 3: Propagate heat and light on the write buffer
+            simulationShader.SetBuffer(_heatLightKernel, PropWriteBuffer, writeBuf);
+            simulationShader.SetInt(PropWorldSize, worldSize);
+            simulationShader.SetInt(PropFrameCount, (int)_frameCount);
+            simulationShader.Dispatch(_heatLightKernel, simGroups, simGroups, simGroups);
 
             // Swap buffers
             _pingPong = !_pingPong;

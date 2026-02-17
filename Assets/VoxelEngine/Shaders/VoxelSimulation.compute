@@ -7,6 +7,7 @@
 
 #pragma kernel ClearWriteBuffer
 #pragma kernel SimulateVoxels
+#pragma kernel PropagateHeatAndLight
 
 #include "VoxelCommon.hlsl"
 
@@ -55,6 +56,41 @@ bool TryClaim(int3 pos, uint voxel)
 uint Rand(int3 pos)
 {
     return HashPos(pos, _FrameCount * 7919u + _SimStep * 104729u);
+}
+
+// --- Neighbor sampling for heat/light ---
+
+void GetNeighborTempAndLight(int3 pos, out uint maxNeighborTemp, out uint maxNeighborLight)
+{
+    maxNeighborTemp = 0;
+    maxNeighborLight = 0;
+    
+    int3 offsets[6] = {
+        int3(1,0,0), int3(-1,0,0),
+        int3(0,1,0), int3(0,-1,0),
+        int3(0,0,1), int3(0,0,-1)
+    };
+    
+    for (int i = 0; i < 6; i++)
+    {
+        int3 nPos = pos + offsets[i];
+        if (!InBounds(nPos)) continue;
+        
+        uint nVoxel = _ReadBuffer[Idx(nPos)];
+        uint nMat = GetMaterialId(nVoxel);
+        uint nTemp = GetTemperature(nVoxel);
+        uint nLight = GetLightLevel(nVoxel);
+        
+        if (nTemp > maxNeighborTemp)
+            maxNeighborTemp = nTemp;
+        
+        // Light only propagates through non-blocking materials
+        if (!BlocksLight(nMat) || nLight > 0)
+        {
+            if (nLight > maxNeighborLight)
+                maxNeighborLight = nLight;
+        }
+    }
 }
 
 // --- Clear Kernel ---
@@ -288,18 +324,18 @@ void SimulateVoxels(uint3 id : SV_DispatchThreadID)
             }
         }
         
-        // Dissipate after some time (based on aux data as lifetime)
-        uint aux = GetAuxData(voxel);
-        if (aux > 200)
+        // Dissipate: use temperature field as cooldown (steam cools and vanishes)
+        uint steamTemp = GetTemperature(voxel);
+        if (steamTemp >= 15)
         {
-            // Steam disappears
-            return; // Don't claim any position = disappear
+            // Fully cooled steam disappears
+            return;
         }
         
-        // Increment lifetime
+        // Increment cooldown counter in temperature field
         if (!moved)
         {
-            uint newVoxel = SetAuxData(voxel, aux + 1);
+            uint newVoxel = SetTemperature(voxel, steamTemp + 1);
             TryClaim(pos, newVoxel);
         }
         return;
@@ -307,4 +343,159 @@ void SimulateVoxels(uint3 id : SV_DispatchThreadID)
     
     // Fallback: claim current position
     TryClaim(pos, voxel);
+}
+
+// ============================================================================
+// Heat & Light Propagation Kernel
+// Runs AFTER SimulateVoxels on the write buffer (now the read buffer after swap)
+// Uses a second read-then-write pass on the same buffer
+// ============================================================================
+
+[numthreads(4, 4, 4)]
+void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
+{
+    int3 pos = int3(id);
+    if (!InBounds(pos)) return;
+    
+    // This kernel operates on _WriteBuffer as both read and write
+    // It's safe because each voxel only writes to itself
+    uint voxel = _WriteBuffer[Idx(pos)];
+    uint mat = GetMaterialId(voxel);
+    
+    if (mat == MAT_AIR) return;
+    
+    // --- Gather neighbor info from _WriteBuffer ---
+    uint maxNeighborTemp = 0;
+    uint maxNeighborLight = 0;
+    
+    int3 offsets[6] = {
+        int3(1,0,0), int3(-1,0,0),
+        int3(0,1,0), int3(0,-1,0),
+        int3(0,0,1), int3(0,0,-1)
+    };
+    
+    for (int i = 0; i < 6; i++)
+    {
+        int3 nPos = pos + offsets[i];
+        if (!InBounds(nPos)) continue;
+        
+        uint nVoxel = _WriteBuffer[Idx(nPos)];
+        uint nMat = GetMaterialId(nVoxel);
+        uint nTemp = GetTemperature(nVoxel);
+        uint nLight = GetLightLevel(nVoxel);
+        
+        if (nTemp > maxNeighborTemp)
+            maxNeighborTemp = nTemp;
+        
+        if (nLight > maxNeighborLight)
+            maxNeighborLight = nLight;
+    }
+    
+    // --- Compute new temperature ---
+    uint currentTemp = GetTemperature(voxel);
+    uint newTemp = currentTemp;
+    
+    // Heat sources always emit max temperature
+    uint heatSource = GetMaterialHeatSource(mat);
+    if (heatSource > 0)
+    {
+        newTemp = heatSource;
+    }
+    else if (IsHeatSink(mat))
+    {
+        // Heat sinks cool down faster
+        newTemp = (maxNeighborTemp > 2) ? maxNeighborTemp - 2 : 0;
+        // Water/Snow cap at lower temp (they absorb heat)
+        if (mat == MAT_WATER && newTemp > 10) newTemp = 10;
+        if (mat == MAT_SNOW && newTemp > 3) newTemp = 3;
+    }
+    else
+    {
+        // Normal heat diffusion: inherit from hotter neighbors with decay
+        if (maxNeighborTemp > currentTemp + 1)
+            newTemp = maxNeighborTemp - 1;
+        else if (currentTemp > 0)
+            newTemp = currentTemp - 1; // Natural cooling
+    }
+    
+    // Clamp temperature
+    newTemp = clamp(newTemp, 0, 15);
+    
+    // --- Heat-induced state changes ---
+    // Wood burns at high temperature
+    if (mat == MAT_WOOD && newTemp >= 10)
+    {
+        if (newTemp >= 13)
+        {
+            // Fully burned → air
+            _WriteBuffer[Idx(pos)] = 0;
+            return;
+        }
+        else
+        {
+            // Charring → coal
+            uint coalVoxel = PackVoxel(MAT_COAL, 0, 0);
+            coalVoxel = SetTempAndLight(coalVoxel, newTemp, newTemp > 6 ? newTemp - 4 : 0);
+            _WriteBuffer[Idx(pos)] = coalVoxel;
+            return;
+        }
+    }
+    
+    // Leaves burn easily
+    if (mat == MAT_LEAF && newTemp >= 6)
+    {
+        // Leaves burn to nothing
+        _WriteBuffer[Idx(pos)] = 0;
+        return;
+    }
+    
+    // Snow melts
+    if (mat == MAT_SNOW && newTemp >= 4)
+    {
+        uint waterVoxel = PackVoxel(MAT_WATER, 0, 0);
+        waterVoxel = SetTempAndLight(waterVoxel, 0, 0);
+        _WriteBuffer[Idx(pos)] = waterVoxel;
+        return;
+    }
+    
+    // Water evaporates at very high temp
+    if (mat == MAT_WATER && newTemp >= 12)
+    {
+        uint steamVoxel = PackVoxel(MAT_STEAM, 0, 0);
+        steamVoxel = SetTempAndLight(steamVoxel, 0, 0);
+        _WriteBuffer[Idx(pos)] = steamVoxel;
+        return;
+    }
+    
+    // --- Compute new light level ---
+    uint currentLight = GetLightLevel(voxel);
+    uint newLight = 0;
+    
+    // Emissive materials produce light
+    uint emission = GetMaterialEmission(mat);
+    if (emission > 0)
+    {
+        newLight = emission;
+    }
+    // Hot coal glows
+    else if (mat == MAT_COAL && newTemp > 4)
+    {
+        newLight = min(newTemp - 2, 10);
+    }
+    else if (!BlocksLight(mat))
+    {
+        // Transparent materials propagate light with decay
+        newLight = (maxNeighborLight > 1) ? maxNeighborLight - 1 : 0;
+    }
+    else
+    {
+        // Opaque surfaces receive light from neighbors (for surface illumination)
+        newLight = (maxNeighborLight > 2) ? maxNeighborLight - 2 : 0;
+    }
+    
+    newLight = clamp(newLight, 0, 15);
+    
+    // --- Write updated aux data ---
+    voxel = SetTempAndLight(voxel, newTemp, newLight);
+    _WriteBuffer[Idx(pos)] = voxel;
 }

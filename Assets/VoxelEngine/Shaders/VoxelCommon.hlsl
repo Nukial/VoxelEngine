@@ -156,6 +156,78 @@ bool IsSolid(uint matId)
     return matId != MAT_AIR && matId != MAT_WATER && matId != MAT_LAVA && matId != MAT_STEAM;
 }
 
+// --- Temperature & Light (packed in Aux byte) ---
+// Aux byte layout: bits 0-3 = temperature (0-15), bits 4-7 = light level (0-15)
+
+uint GetTemperature(uint voxel)
+{
+    return (GetAuxData(voxel)) & 0xF;
+}
+
+uint GetLightLevel(uint voxel)
+{
+    return (GetAuxData(voxel) >> 4) & 0xF;
+}
+
+uint SetTemperature(uint voxel, uint temp)
+{
+    uint aux = GetAuxData(voxel);
+    aux = (aux & 0xF0) | (temp & 0xF);
+    return SetAuxData(voxel, aux);
+}
+
+uint SetLightLevel(uint voxel, uint light)
+{
+    uint aux = GetAuxData(voxel);
+    aux = (aux & 0x0F) | ((light & 0xF) << 4);
+    return SetAuxData(voxel, aux);
+}
+
+uint SetTempAndLight(uint voxel, uint temp, uint light)
+{
+    uint aux = (temp & 0xF) | ((light & 0xF) << 4);
+    return SetAuxData(voxel, aux);
+}
+
+// --- Material Properties ---
+
+// Base emission level for each material (0 = no emission)
+uint GetMaterialEmission(uint matId)
+{
+    if (matId == MAT_LAVA)  return 15;
+    if (matId == MAT_COAL)  return 0;  // only emits when hot
+    return 0;
+}
+
+// How much heat a material generates per tick
+uint GetMaterialHeatSource(uint matId)
+{
+    if (matId == MAT_LAVA)  return 15;
+    return 0;
+}
+
+// Whether a material absorbs/sinks heat
+bool IsHeatSink(uint matId)
+{
+    return matId == MAT_WATER || matId == MAT_SNOW || matId == MAT_AIR;
+}
+
+// Opacity for transparency rendering (0.0 = fully transparent, 1.0 = opaque)
+float GetMaterialOpacity(uint matId)
+{
+    if (matId == MAT_AIR)   return 0.0;
+    if (matId == MAT_GLASS) return 0.15;
+    if (matId == MAT_WATER) return 0.35;
+    if (matId == MAT_STEAM) return 0.10;
+    return 1.0;
+}
+
+// Whether a material blocks light propagation
+bool BlocksLight(uint matId)
+{
+    return matId != MAT_AIR && matId != MAT_GLASS && matId != MAT_WATER && matId != MAT_STEAM;
+}
+
 // --- Hashing (for pseudo-random in shaders) ---
 
 uint VoxelHash(uint x)

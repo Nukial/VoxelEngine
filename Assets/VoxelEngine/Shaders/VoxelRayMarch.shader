@@ -107,6 +107,18 @@ Shader "VoxelEngine/RayMarch"
                 uint voxelData;
             };
             
+            // Transparent layer for front-to-back blending
+            struct TransparentLayer
+            {
+                float3 color;
+                float opacity;
+                int3 voxelPos;
+                float3 normal;
+                uint voxelData;
+            };
+            
+            #define MAX_TRANSPARENT_LAYERS 6
+            
             // --- Vertex Shader ---
             
             Varyings vert(Attributes input)
@@ -180,8 +192,12 @@ Shader "VoxelEngine/RayMarch"
             }
             
             // --- Amanatides and Woo Ray Marching with Brick Map ---
+            // Extended to support transparency: collects transparent layers
+            // and continues marching until hitting an opaque surface.
             
-            RayHit RayMarchVoxels(float3 origin, float3 dir, int maxSteps)
+            RayHit RayMarchVoxels(float3 origin, float3 dir, int maxSteps,
+                                  out TransparentLayer transLayers[MAX_TRANSPARENT_LAYERS],
+                                  out int transCount)
             {
                 RayHit result;
                 result.hit = false;
@@ -189,6 +205,17 @@ Shader "VoxelEngine/RayMarch"
                 result.normal = float3(0, 1, 0);
                 result.voxelPos = int3(0, 0, 0);
                 result.voxelData = 0;
+                
+                transCount = 0;
+                [unroll]
+                for (int tl = 0; tl < MAX_TRANSPARENT_LAYERS; tl++)
+                {
+                    transLayers[tl].color = float3(0, 0, 0);
+                    transLayers[tl].opacity = 0;
+                    transLayers[tl].voxelPos = int3(0, 0, 0);
+                    transLayers[tl].normal = float3(0, 1, 0);
+                    transLayers[tl].voxelData = 0;
+                }
                 
                 // AABB intersection with voxel volume [0, WorldSize]
                 float tNear, tFar;
@@ -320,25 +347,65 @@ Shader "VoxelEngine/RayMarch"
                     
                     if (matId != MAT_AIR)
                     {
-                        result.hit = true;
-                        result.voxelPos = pos;
-                        result.normal = normal;
-                        result.voxelData = voxel;
+                        float matOpacity = GetMaterialOpacity(matId);
                         
-                        // Compute hit distance
-                        float3 tLast = tMax - tDelta;
-                        result.t = max(max(tLast.x * (abs(normal.x) > 0.5 ? 1 : 0) + 
-                                           tLast.y * (abs(normal.y) > 0.5 ? 1 : 0) + 
-                                           tLast.z * (abs(normal.z) > 0.5 ? 1 : 0), 0), tNear);
-                        
-                        // Fallback distance computation
-                        if (length(normal) < 0.5)
+                        // Transparent material: record layer and continue marching
+                        if (matOpacity < 1.0 && transCount < MAX_TRANSPARENT_LAYERS)
                         {
-                            result.t = tNear;
-                            result.normal = float3(0, 1, 0);
+                            // Get color for transparent layer
+                            uint tc565 = GetColor565(voxel);
+                            float3 tColor = (tc565 != 0) ? Color565ToRGB(tc565) : GetDefaultMaterialColor(matId);
+                            
+                            transLayers[transCount].color = tColor;
+                            transLayers[transCount].opacity = matOpacity;
+                            transLayers[transCount].voxelPos = pos;
+                            transLayers[transCount].normal = normal;
+                            transLayers[transCount].voxelData = voxel;
+                            transCount++;
+                            
+                            // If first transparent hit, record t for depth
+                            if (!result.hit)
+                            {
+                                float3 tLast = tMax - tDelta;
+                                float firstT = max(max(tLast.x * (abs(normal.x) > 0.5 ? 1 : 0) + 
+                                                       tLast.y * (abs(normal.y) > 0.5 ? 1 : 0) + 
+                                                       tLast.z * (abs(normal.z) > 0.5 ? 1 : 0), 0), tNear);
+                                result.t = firstT;
+                                result.voxelPos = pos;
+                                result.normal = normal;
+                                result.voxelData = voxel;
+                            }
+                            
+                            // Continue marching through transparent voxel
                         }
-                        
-                        return result;
+                        else
+                        {
+                            // Opaque hit
+                            result.hit = true;
+                            result.voxelPos = pos;
+                            result.normal = normal;
+                            result.voxelData = voxel;
+                            
+                            // Compute hit distance
+                            float3 tLast = tMax - tDelta;
+                            float hitT = max(max(tLast.x * (abs(normal.x) > 0.5 ? 1 : 0) + 
+                                               tLast.y * (abs(normal.y) > 0.5 ? 1 : 0) + 
+                                               tLast.z * (abs(normal.z) > 0.5 ? 1 : 0), 0), tNear);
+                            
+                            // If we had transparent layers before, keep the first t
+                            if (transCount == 0)
+                                result.t = hitT;
+                            
+                            // Fallback distance computation
+                            if (length(normal) < 0.5)
+                            {
+                                if (transCount == 0)
+                                    result.t = tNear;
+                                result.normal = float3(0, 1, 0);
+                            }
+                            
+                            return result;
+                        }
                     }
                     
                     // Amanatides and Woo: step to next voxel
@@ -372,6 +439,13 @@ Shader "VoxelEngine/RayMarch"
                             normal = float3(0, 0, -stepDir.z);
                         }
                     }
+                }
+                
+                // If we only hit transparent layers with no opaque behind, still report a hit
+                if (!result.hit && transCount > 0)
+                {
+                    result.hit = true;
+                    // result.t was already set at first transparent hit
                 }
                 
                 return result;
@@ -478,37 +552,13 @@ Shader "VoxelEngine/RayMarch"
                 return false;
             }
             
-            // --- Fragment Shader ---
+            // --- Shade a single voxel surface ---
             
-            FragOutput frag(Varyings input)
+            float3 ShadeVoxel(int3 voxelPos, float3 normal, uint voxelData,
+                              float3 voxelDir, float3 L)
             {
-                FragOutput output;
-                
-                // Ray setup in world space
-                float3 camPos = GetCameraPositionWS();
-                float3 rayDir = normalize(input.positionWS - camPos);
-                
-                // Transform to voxel space
-                float3 voxelOrigin = WorldToVoxel(camPos);
-                float3 voxelDir = rayDir; // Direction unchanged by translation+uniform scale
-                
-                // Ray march
-                RayHit hit = RayMarchVoxels(voxelOrigin, voxelDir, _MaxSteps);
-                
-                if (!hit.hit)
-                {
-                    // Output fog/sky color for miss rays instead of discard.
-                    // This avoids leaving holes in the volume that cause
-                    // depth-buffer issues and gives a cleaner look.
-                    output.color = _FogColor;
-                    // Write far depth so it doesn't occlude anything
-                    output.depth = 0.0; // far plane in reversed-Z
-                    return output;
-                }
-                
-                // --- Shading ---
-                uint matId = GetMaterialId(hit.voxelData);
-                uint color565 = GetColor565(hit.voxelData);
+                uint matId = GetMaterialId(voxelData);
+                uint color565 = GetColor565(voxelData);
                 
                 // Base color
                 float3 baseColor;
@@ -517,42 +567,40 @@ Shader "VoxelEngine/RayMarch"
                 else
                     baseColor = GetDefaultMaterialColor(matId);
                 
-                // Add subtle variation based on position
-                float variation = HashToFloat(HashPos(hit.voxelPos, 42u));
+                // Subtle variation
+                float variation = HashToFloat(HashPos(voxelPos, 42u));
                 baseColor *= lerp(0.9, 1.1, variation);
                 
-                float3 N = normalize(hit.normal);
-                float3 L = normalize(_SunDir);
+                float3 N = normalize(normal);
                 float3 V = normalize(-voxelDir);
                 float3 H = normalize(L + V);
                 
-                // Diffuse (Lambert)
+                // Diffuse
                 float NdotL = max(dot(N, L), 0.0);
                 
-                // Specular (Blinn-Phong)
+                // Specular
                 float NdotH = max(dot(N, H), 0.0);
                 float specIntensity = (matId == MAT_WATER || matId == MAT_GLASS) ? 0.6 :
                                       (matId == MAT_LAVA) ? 0.0 :
                                       (matId == MAT_IRON || matId == MAT_GOLD) ? 0.4 : 0.08;
                 float spec = pow(NdotH, _SpecularPower) * specIntensity;
                 
-                // Shadow ray - use _ShadowStrength for smooth transition
+                // Shadow
                 float shadowFactor = 1.0;
                 #ifdef VOXEL_SHADOWS_ON
                 {
-                    float3 shadowOrigin = float3(hit.voxelPos) + 0.5 + hit.normal * 1.2 + L * 0.15;
+                    float3 shadowOrigin = float3(voxelPos) + 0.5 + normal * 1.2 + L * 0.15;
                     if (CastShadowRay(shadowOrigin, L, _MaxShadowSteps))
                     {
-                        // Blend shadow intensity based on _ShadowStrength
                         float shadowDarkness = lerp(1.0, 0.25, _ShadowStrength);
                         shadowFactor = shadowDarkness;
                     }
                 }
                 #endif
                 
-                // Simple AO: check adjacent voxels in normal direction
+                // AO
                 float ao = 1.0;
-                int3 aoPos = hit.voxelPos + int3(hit.normal);
+                int3 aoPos = voxelPos + int3(normal);
                 int aoCount = 0;
                 [unroll]
                 for (int dx = -1; dx <= 1; dx++)
@@ -561,9 +609,9 @@ Shader "VoxelEngine/RayMarch"
                     for (int dz = -1; dz <= 1; dz++)
                     {
                         int3 checkPos;
-                        if (abs(hit.normal.y) > 0.5)
+                        if (abs(normal.y) > 0.5)
                             checkPos = aoPos + int3(dx, 0, dz);
-                        else if (abs(hit.normal.x) > 0.5)
+                        else if (abs(normal.x) > 0.5)
                             checkPos = aoPos + int3(0, dx, dz);
                         else
                             checkPos = aoPos + int3(dx, dz, 0);
@@ -581,29 +629,151 @@ Shader "VoxelEngine/RayMarch"
                 
                 float3 finalColor = baseColor * (ambient + diffuse) + specular;
                 
-                // Emission for lava
+                // --- Emission from light level (propagated voxel light) ---
+                uint lightLevel = GetLightLevel(voxelData);
+                if (lightLevel > 0)
+                {
+                    float lightFactor = float(lightLevel) / 15.0;
+                    // Warm light tint from nearby emissive sources
+                    float3 voxelLightColor = float3(1.0, 0.7, 0.3) * lightFactor * 0.8;
+                    finalColor += baseColor * voxelLightColor;
+                }
+                
+                // --- Heat glow: hot materials visually glow ---
+                uint temperature = GetTemperature(voxelData);
+                if (temperature > 4)
+                {
+                    float heatFactor = float(temperature - 4) / 11.0; // 0 to 1
+                    float3 heatColor = lerp(float3(0.6, 0.1, 0.0), float3(1.5, 0.8, 0.2), heatFactor);
+                    finalColor += heatColor * heatFactor * 1.5;
+                }
+                
+                // --- Emission for lava ---
                 if (matId == MAT_LAVA)
                 {
                     float pulse = 0.8 + 0.2 * sin(_Time.y * 2.0 + variation * 6.28);
                     finalColor += float3(2.5, 0.8, 0.1) * pulse;
                 }
                 
-                // Distance fog
-                float3 hitWorldPos = VoxelToWorld(float3(hit.voxelPos) + 0.5);
-                float dist = distance(camPos, hitWorldPos);
-                float fogFactor = 1.0 - exp(-dist * _FogDensity);
+                // --- Emission for hot coal ---
+                if (matId == MAT_COAL && temperature > 4)
+                {
+                    float coalGlow = float(temperature - 4) / 11.0;
+                    float pulse = 0.7 + 0.3 * sin(_Time.y * 1.5 + variation * 3.14);
+                    finalColor += float3(1.2, 0.3, 0.05) * coalGlow * pulse;
+                }
                 
-                // Render distance fade: smooth transition to fog at max distance
+                return finalColor;
+            }
+            
+            // --- Fragment Shader ---
+            
+            FragOutput frag(Varyings input)
+            {
+                FragOutput output;
+                
+                // Ray setup in world space
+                float3 camPos = GetCameraPositionWS();
+                float3 rayDir = normalize(input.positionWS - camPos);
+                
+                // Transform to voxel space
+                float3 voxelOrigin = WorldToVoxel(camPos);
+                float3 voxelDir = rayDir;
+                
+                // Ray march with transparency support
+                TransparentLayer transLayers[MAX_TRANSPARENT_LAYERS];
+                int transCount;
+                RayHit hit = RayMarchVoxels(voxelOrigin, voxelDir, _MaxSteps,
+                                            transLayers, transCount);
+                
+                if (!hit.hit)
+                {
+                    output.color = _FogColor;
+                    output.depth = 0.0;
+                    return output;
+                }
+                
+                float3 L = normalize(_SunDir);
+                
+                // --- Shade opaque background (or fog if only transparent hits) ---
+                uint opaqueMatId = GetMaterialId(hit.voxelData);
+                float opaqueOpacity = GetMaterialOpacity(opaqueMatId);
+                
+                float3 opaqueColor;
+                float3 depthWorldPos;
+                
+                if (opaqueOpacity >= 1.0)
+                {
+                    // We have an opaque surface behind transparent layers
+                    opaqueColor = ShadeVoxel(hit.voxelPos, hit.normal, hit.voxelData, voxelDir, L);
+                    depthWorldPos = VoxelToWorld(float3(hit.voxelPos) + 0.5);
+                }
+                else
+                {
+                    // Only transparent hits, no opaque behind
+                    opaqueColor = _FogColor.rgb;
+                    depthWorldPos = VoxelToWorld(float3(hit.voxelPos) + 0.5);
+                }
+                
+                // --- Composite transparent layers (back-to-front) ---
+                float3 composited = opaqueColor;
+                
+                for (int tIdx = transCount - 1; tIdx >= 0; tIdx--)
+                {
+                    float3 tColor = transLayers[tIdx].color;
+                    float tOpacity = transLayers[tIdx].opacity;
+                    uint tVoxelData = transLayers[tIdx].voxelData;
+                    uint tMatId = GetMaterialId(tVoxelData);
+                    
+                    // Add subtle variation to transparent layers
+                    float tVar = HashToFloat(HashPos(transLayers[tIdx].voxelPos, 77u));
+                    tColor *= lerp(0.93, 1.07, tVar);
+                    
+                    // Shade the transparent surface (simplified, no shadow)
+                    float3 tN = normalize(transLayers[tIdx].normal);
+                    float tNdotL = max(dot(tN, L), 0.0);
+                    float3 tLit = tColor * (_AmbientColor.rgb + _SunColor.rgb * _SunIntensity * tNdotL * 0.5);
+                    
+                    // Light level contribution on transparent surfaces
+                    uint tLight = GetLightLevel(tVoxelData);
+                    if (tLight > 0)
+                    {
+                        float tlf = float(tLight) / 15.0;
+                        tLit += tColor * float3(1.0, 0.7, 0.3) * tlf * 0.5;
+                    }
+                    
+                    // Water refraction-like tint
+                    if (tMatId == MAT_WATER)
+                    {
+                        composited *= lerp(float3(1, 1, 1), float3(0.7, 0.85, 1.0), tOpacity);
+                    }
+                    
+                    // Glass: slight color tint
+                    if (tMatId == MAT_GLASS)
+                    {
+                        // Specular on glass
+                        float3 tV = normalize(-voxelDir);
+                        float3 tH = normalize(L + tV);
+                        float tSpec = pow(max(dot(tN, tH), 0.0), 64.0) * 0.8;
+                        tLit += _SunColor.rgb * tSpec;
+                    }
+                    
+                    // Blend: front-to-back compositing
+                    composited = lerp(composited, tLit, tOpacity);
+                }
+                
+                // --- Distance fog ---
+                float dist = distance(camPos, depthWorldPos);
+                float fogFactor = 1.0 - exp(-dist * _FogDensity);
                 float distFade = saturate((dist - _MaxRenderDist * 0.75) / (_MaxRenderDist * 0.25));
                 fogFactor = max(fogFactor, distFade);
-                
-                finalColor = lerp(finalColor, _FogColor.rgb, saturate(fogFactor));
+                composited = lerp(composited, _FogColor.rgb, saturate(fogFactor));
                 
                 // HDR output
-                output.color = float4(finalColor, 1.0);
+                output.color = float4(composited, 1.0);
                 
                 // Depth output
-                float4 clipPos = TransformWorldToHClip(hitWorldPos);
+                float4 clipPos = TransformWorldToHClip(depthWorldPos);
                 output.depth = clipPos.z / clipPos.w;
                 
                 return output;

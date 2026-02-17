@@ -161,5 +161,49 @@ namespace VoxelEngine
         {
             return materialId == MAT_SAND || materialId == MAT_SNOW || materialId == MAT_COAL;
         }
+
+        // --- Temperature & Light (packed in Aux byte) ---
+        // Aux byte layout: bits 0-3 = temperature (0-15), bits 4-7 = light level (0-15)
+
+        public static uint GetTemperature(uint voxel)
+        {
+            return GetAuxData(voxel) & 0xFu;
+        }
+
+        public static uint GetLightLevel(uint voxel)
+        {
+            return (uint)(GetAuxData(voxel) >> 4) & 0xFu;
+        }
+
+        public static uint SetTemperature(uint voxel, uint temp)
+        {
+            byte aux = GetAuxData(voxel);
+            aux = (byte)((aux & 0xF0) | (temp & 0xF));
+            return Pack(GetMaterialId(voxel), GetColor565(voxel), aux);
+        }
+
+        public static uint SetLightLevel(uint voxel, uint light)
+        {
+            byte aux = GetAuxData(voxel);
+            aux = (byte)((aux & 0x0F) | ((light & 0xF) << 4));
+            return Pack(GetMaterialId(voxel), GetColor565(voxel), aux);
+        }
+
+        public static uint SetTempAndLight(uint voxel, uint temp, uint light)
+        {
+            byte aux = (byte)((temp & 0xF) | ((light & 0xF) << 4));
+            return Pack(GetMaterialId(voxel), GetColor565(voxel), aux);
+        }
+
+        public static bool IsTransparent(uint materialId)
+        {
+            return materialId == MAT_AIR || materialId == MAT_WATER ||
+                   materialId == MAT_GLASS || materialId == MAT_STEAM;
+        }
+
+        public static bool IsEmissive(uint materialId)
+        {
+            return materialId == MAT_LAVA;
+        }
     }
 }
