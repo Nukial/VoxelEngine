@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"*.asset": "yaml",
+			"*.meta": "yaml",
+			"*.prefab": "yaml",
+			"*.unity": "yaml"
+		},
+		"dotnet.defaultSolution": "VoxelEngine.slnx",
+		"chat.tools.terminal.autoApprove": {
+			"git -C \"c:/Users/luany/Project/VoxelEngine\"": true,
+			"git ls-remote": true
+		}
+	}
+}

@@ -1,0 +1,77 @@
+// ============================================================================
+// BrickMapUpdate.compute
+// Scans voxel data and updates the brick map acceleration structure
+// Each brick (8x8x8 voxels) stores whether it contains any non-air voxels
+// ============================================================================
+
+#pragma kernel UpdateBrickMap
+
+#include "VoxelCommon.hlsl"
+
+StructuredBuffer<uint>   _VoxelBuffer;
+RWStructuredBuffer<uint> _BrickMap;
+
+int _WorldSize;
+int _BrickSize;
+int _BrickMapSize;
+
+// Shared memory for collecting results within a thread group
+groupshared uint g_hasContent;
+
+// Each thread group processes one brick
+// 4x4x4 = 64 threads, each checking a 2x2x2 sub-region of the 8x8x8 brick
+
+[numthreads(4, 4, 4)]
+void UpdateBrickMap(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID)
+{
+    int3 brickPos = int3(groupId);
+    
+    if (any(brickPos >= _BrickMapSize))
+        return;
+    
+    // First thread clears shared memory
+    if (all(threadId == uint3(0, 0, 0)))
+        g_hasContent = 0;
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    // Each thread checks a 2x2x2 sub-region within the brick
+    int3 baseVoxel = brickPos * _BrickSize + int3(threadId) * 2;
+    
+    bool localHasContent = false;
+    
+    [unroll]
+    for (int z = 0; z < 2; z++)
+    {
+        [unroll]
+        for (int y = 0; y < 2; y++)
+        {
+            [unroll]
+            for (int x = 0; x < 2; x++)
+            {
+                int3 vPos = baseVoxel + int3(x, y, z);
+                if (IsInBounds(vPos, _WorldSize))
+                {
+                    uint voxel = _VoxelBuffer[Flatten3D(vPos, _WorldSize)];
+                    if (GetMaterialId(voxel) != MAT_AIR)
+                    {
+                        localHasContent = true;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Contribute to shared result
+    if (localHasContent)
+        InterlockedOr(g_hasContent, 1u);
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    // First thread writes the final result
+    if (all(threadId == uint3(0, 0, 0)))
+    {
+        int brickIdx = Flatten3D(brickPos, _BrickMapSize);
+        _BrickMap[brickIdx] = g_hasContent;
+    }
+}

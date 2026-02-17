@@ -1,0 +1,170 @@
+// ============================================================================
+// TerrainGeneration.compute
+// Generates initial terrain using noise-based heightmap + 3D caves
+// ============================================================================
+
+#pragma kernel GenerateTerrain
+#pragma kernel ClearBuffer
+
+#include "VoxelCommon.hlsl"
+#include "VoxelNoise.hlsl"
+
+RWStructuredBuffer<uint> _VoxelBuffer;
+
+int _WorldSize;
+float _Seed;
+float _TerrainScale;
+float _CaveScale;
+float _CaveThreshold;
+int _WaterLevel;
+
+// Helper: simple variation based on position (must be declared before use)
+float variation2D(float2 p)
+{
+    return ValueNoise2D(p * 3.0) * 2.0 - 1.0;
+}
+
+float variation3D(float3 p)
+{
+    return ValueNoise3D(p * 3.0) * 2.0 - 1.0;
+}
+
+[numthreads(4, 4, 4)]
+void GenerateTerrain(uint3 id : SV_DispatchThreadID)
+{
+    int3 pos = int3(id);
+    if (!IsInBounds(pos, _WorldSize))
+        return;
+    
+    int idx = Flatten3D(pos, _WorldSize);
+    float3 worldPos = float3(pos) + float3(_Seed, 0, _Seed * 0.7);
+    
+    // --- Heightmap ---
+    float2 xz = float2(worldPos.x, worldPos.z) * _TerrainScale;
+    
+    // Base terrain height using FBM
+    float baseHeight = FBM2D(xz * 0.8, 6, 2.0, 0.5);
+    
+    // Mountain ridges
+    float ridges = RidgedNoise3D(float3(xz.x, 0, xz.y) * 0.5, 4, 2.0, 0.5);
+    
+    // Combine: base terrain + mountains
+    float terrainHeight = baseHeight * 0.6 + ridges * 0.4;
+    terrainHeight = terrainHeight * 0.5 + 0.1; // Scale to [0.1, 0.6] of world height
+    
+    float height = terrainHeight * _WorldSize;
+    float y = float(pos.y);
+    
+    // --- 3D Caves ---
+    float3 caveCoord = worldPos * _CaveScale;
+    float caveNoise = FBM3D(caveCoord, 3, 2.0, 0.5);
+    bool isCave = caveNoise > _CaveThreshold && y > 3.0; // No caves at very bottom
+    
+    // --- Material Assignment ---
+    uint voxel = 0;
+    
+    if (y <= height && !isCave)
+    {
+        // Determine material based on depth from surface
+        float depthFromSurface = height - y;
+        
+        if (depthFromSurface < 1.0)
+        {
+            // Surface layer
+            if (y > _WaterLevel + 2)
+            {
+                // Grass on top
+                float3 grassColor = float3(0.28 + variation2D(xz) * 0.08, 
+                                           0.55 + variation2D(xz * 1.3) * 0.15, 
+                                           0.18 + variation2D(xz * 0.7) * 0.06);
+                voxel = PackVoxel(MAT_GRASS, RGBToColor565(grassColor), 0);
+            }
+            else if (y <= _WaterLevel + 2 && y > _WaterLevel - 3)
+            {
+                // Sand near water level
+                float3 sandColor = float3(0.88 + variation2D(xz) * 0.06,
+                                          0.82 + variation2D(xz * 1.1) * 0.06,
+                                          0.58 + variation2D(xz * 0.9) * 0.08);
+                voxel = PackVoxel(MAT_SAND, RGBToColor565(sandColor), 0);
+            }
+            else
+            {
+                // Snow on high peaks
+                if (y > _WorldSize * 0.55)
+                {
+                    voxel = PackVoxel(MAT_SNOW, 0, 0);
+                }
+                else
+                {
+                    float3 grassColor = float3(0.28, 0.55, 0.18);
+                    voxel = PackVoxel(MAT_GRASS, RGBToColor565(grassColor), 0);
+                }
+            }
+        }
+        else if (depthFromSurface < 5.0)
+        {
+            // Dirt layer
+            float3 dirtColor = float3(0.52 + variation2D(worldPos.xz) * 0.08,
+                                      0.34 + variation2D(worldPos.xz * 1.2) * 0.06,
+                                      0.20 + variation2D(worldPos.xz * 0.8) * 0.05);
+            voxel = PackVoxel(MAT_DIRT, RGBToColor565(dirtColor), 0);
+        }
+        else
+        {
+            // Stone layer
+            float3 stoneColor = float3(0.48 + variation3D(worldPos) * 0.08,
+                                       0.48 + variation3D(worldPos * 1.1) * 0.06,
+                                       0.50 + variation3D(worldPos * 0.9) * 0.06);
+            
+            // Ore deposits
+            float oreNoise = ValueNoise3D(worldPos * 0.15);
+            if (oreNoise > 0.82)
+            {
+                float oreType = ValueNoise3D(worldPos * 0.3);
+                if (oreType > 0.7)
+                    voxel = PackVoxel(MAT_GOLD, 0, 0);
+                else if (oreType > 0.4)
+                    voxel = PackVoxel(MAT_IRON, 0, 0);
+                else
+                    voxel = PackVoxel(MAT_COAL, 0, 0);
+            }
+            else
+            {
+                voxel = PackVoxel(MAT_STONE, RGBToColor565(stoneColor), 0);
+            }
+        }
+    }
+    else if (y <= _WaterLevel && y > height)
+    {
+        // Water filling
+        float3 waterColor = float3(0.18 + (float(_WaterLevel - pos.y) / 20.0) * 0.1,
+                                   0.38 - (float(_WaterLevel - pos.y) / 20.0) * 0.1,
+                                   0.78 - (float(_WaterLevel - pos.y) / 20.0) * 0.15);
+        voxel = PackVoxel(MAT_WATER, RGBToColor565(waterColor), 0);
+    }
+    else if (y <= 2.0)
+    {
+        // Bedrock at very bottom (lava pools)
+        float lavaNoise = ValueNoise3D(worldPos * 0.2);
+        if (lavaNoise > 0.6 && isCave)
+        {
+            voxel = PackVoxel(MAT_LAVA, 0, 0);
+        }
+        else
+        {
+            voxel = PackVoxel(MAT_STONE, 0, 0);
+        }
+    }
+    
+    _VoxelBuffer[idx] = voxel;
+}
+
+// --- Clear Buffer Kernel ---
+
+[numthreads(256, 1, 1)]
+void ClearBuffer(uint3 id : SV_DispatchThreadID)
+{
+    uint totalVoxels = (uint)_WorldSize * (uint)_WorldSize * (uint)_WorldSize;
+    if (id.x < totalVoxels)
+        _VoxelBuffer[id.x] = 0;
+}

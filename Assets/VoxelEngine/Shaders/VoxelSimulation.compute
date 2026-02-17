@@ -1,0 +1,310 @@
+// ============================================================================
+// VoxelSimulation.compute
+// Cellular Automata simulation for dynamic voxel physics
+// Sand, Water, Lava with Atomic CAS conflict resolution
+// Ping-pong double buffering
+// ============================================================================
+
+#pragma kernel ClearWriteBuffer
+#pragma kernel SimulateVoxels
+
+#include "VoxelCommon.hlsl"
+
+StructuredBuffer<uint>   _ReadBuffer;
+RWStructuredBuffer<uint> _WriteBuffer;
+
+int _WorldSize;
+uint _FrameCount;
+uint _SimStep;
+
+// --- Helpers ---
+
+int Idx(int3 pos)
+{
+    return Flatten3D(pos, _WorldSize);
+}
+
+bool InBounds(int3 pos)
+{
+    return IsInBounds(pos, _WorldSize);
+}
+
+uint ReadAt(int3 pos)
+{
+    if (!InBounds(pos)) return 0;
+    return _ReadBuffer[Idx(pos)];
+}
+
+uint ReadMatAt(int3 pos)
+{
+    return GetMaterialId(ReadAt(pos));
+}
+
+// Try to claim a position in write buffer using Atomic CAS
+// Returns true if successfully claimed
+bool TryClaim(int3 pos, uint voxel)
+{
+    if (!InBounds(pos)) return false;
+    
+    uint original;
+    InterlockedCompareExchange(_WriteBuffer[Idx(pos)], 0u, voxel, original);
+    return original == 0u;
+}
+
+// Pseudo-random direction selection based on position and frame
+uint Rand(int3 pos)
+{
+    return HashPos(pos, _FrameCount * 7919u + _SimStep * 104729u);
+}
+
+// --- Clear Kernel ---
+
+[numthreads(256, 1, 1)]
+void ClearWriteBuffer(uint3 id : SV_DispatchThreadID)
+{
+    uint total = (uint)_WorldSize * (uint)_WorldSize * (uint)_WorldSize;
+    if (id.x < total)
+        _WriteBuffer[id.x] = 0u;
+}
+
+// --- Simulation Kernel ---
+
+[numthreads(4, 4, 4)]
+void SimulateVoxels(uint3 id : SV_DispatchThreadID)
+{
+    int3 pos = int3(id);
+    if (!InBounds(pos)) return;
+    
+    uint voxel = _ReadBuffer[Idx(pos)];
+    uint mat = GetMaterialId(voxel);
+    
+    // Air: do nothing (write buffer already 0)
+    if (mat == MAT_AIR) return;
+    
+    uint physCat = GetPhysicsCategory(mat);
+    
+    // --- Static Materials ---
+    if (physCat == PHYS_STATIC)
+    {
+        // Just claim current position
+        TryClaim(pos, voxel);
+        return;
+    }
+    
+    uint rng = Rand(pos);
+    bool moved = false;
+    
+    // --- Powder Physics (Sand, Snow, Coal) ---
+    if (physCat == PHYS_POWDER)
+    {
+        // 1. Try fall straight down
+        int3 below = pos + int3(0, -1, 0);
+        if (InBounds(below) && ReadMatAt(below) == MAT_AIR)
+        {
+            moved = TryClaim(below, voxel);
+            if (moved) return;
+        }
+        
+        // 2. Try fall through liquid (swap with liquid below)
+        if (!moved && InBounds(below))
+        {
+            uint belowMat = ReadMatAt(below);
+            if (belowMat == MAT_WATER || belowMat == MAT_STEAM)
+            {
+                uint belowVoxel = ReadAt(below);
+                moved = TryClaim(below, voxel);
+                if (moved)
+                {
+                    TryClaim(pos, belowVoxel); // Put liquid where sand was
+                    return;
+                }
+            }
+        }
+        
+        // 3. Try diagonal falls (creates angle of repose)
+        if (!moved)
+        {
+            // Randomly choose diagonal direction
+            int dx = (rng & 1u) ? 1 : -1;
+            int dz = ((rng >> 1) & 1u) ? 1 : -1;
+            
+            // Try 4 diagonal directions
+            int3 diags[4];
+            diags[0] = pos + int3(dx, -1, 0);
+            diags[1] = pos + int3(0, -1, dz);
+            diags[2] = pos + int3(-dx, -1, 0);
+            diags[3] = pos + int3(0, -1, -dz);
+            
+            for (int d = 0; d < 4; d++)
+            {
+                if (InBounds(diags[d]) && ReadMatAt(diags[d]) == MAT_AIR)
+                {
+                    moved = TryClaim(diags[d], voxel);
+                    if (moved) return;
+                }
+            }
+        }
+        
+        // 4. Stay in place
+        if (!moved)
+        {
+            TryClaim(pos, voxel);
+        }
+        return;
+    }
+    
+    // --- Liquid Physics (Water, Lava) ---
+    if (physCat == PHYS_LIQUID)
+    {
+        // Lava is slower - only simulate every other frame
+        if (mat == MAT_LAVA && (_FrameCount & 1u) == 0u)
+        {
+            // Chemical interactions: Lava + Water = Stone
+            int3 neighbors[6] = {
+                pos + int3(1,0,0), pos + int3(-1,0,0),
+                pos + int3(0,1,0), pos + int3(0,-1,0),
+                pos + int3(0,0,1), pos + int3(0,0,-1)
+            };
+            
+            for (int n = 0; n < 6; n++)
+            {
+                if (InBounds(neighbors[n]) && ReadMatAt(neighbors[n]) == MAT_WATER)
+                {
+                    // Turn lava into stone
+                    uint stoneVoxel = PackVoxel(MAT_STONE, 0, 0);
+                    TryClaim(pos, stoneVoxel);
+                    // The water neighbor will handle itself (turn to steam or stay)
+                    return;
+                }
+            }
+        }
+        
+        // Water near lava: turn to steam
+        if (mat == MAT_WATER)
+        {
+            int3 neighbors[6] = {
+                pos + int3(1,0,0), pos + int3(-1,0,0),
+                pos + int3(0,1,0), pos + int3(0,-1,0),
+                pos + int3(0,0,1), pos + int3(0,0,-1)
+            };
+            
+            for (int n = 0; n < 6; n++)
+            {
+                if (InBounds(neighbors[n]) && ReadMatAt(neighbors[n]) == MAT_LAVA)
+                {
+                    uint steamVoxel = PackVoxel(MAT_STEAM, 0, 0);
+                    TryClaim(pos, steamVoxel);
+                    return;
+                }
+            }
+        }
+        
+        // 1. Try fall down
+        int3 below = pos + int3(0, -1, 0);
+        if (InBounds(below) && ReadMatAt(below) == MAT_AIR)
+        {
+            moved = TryClaim(below, voxel);
+            if (moved) return;
+        }
+        
+        // 2. Try diagonal down
+        if (!moved)
+        {
+            int dx = (rng & 1u) ? 1 : -1;
+            int dz = ((rng >> 1) & 1u) ? 1 : -1;
+            
+            int3 diagDown[4];
+            diagDown[0] = pos + int3(dx, -1, 0);
+            diagDown[1] = pos + int3(0, -1, dz);
+            diagDown[2] = pos + int3(-dx, -1, 0);
+            diagDown[3] = pos + int3(0, -1, -dz);
+            
+            for (int d = 0; d < 4; d++)
+            {
+                if (InBounds(diagDown[d]) && ReadMatAt(diagDown[d]) == MAT_AIR)
+                {
+                    moved = TryClaim(diagDown[d], voxel);
+                    if (moved) return;
+                }
+            }
+        }
+        
+        // 3. Horizontal spread (liquids only)
+        if (!moved)
+        {
+            // For water: spread fast. For lava: slow
+            int spreadChance = (mat == MAT_WATER) ? 3 : 1;
+            
+            if ((rng % 4u) < (uint)spreadChance)
+            {
+                int dx = ((rng >> 2) & 1u) ? 1 : -1;
+                int dz = ((rng >> 3) & 1u) ? 1 : -1;
+                
+                int3 horizontals[4];
+                horizontals[0] = pos + int3(dx, 0, 0);
+                horizontals[1] = pos + int3(0, 0, dz);
+                horizontals[2] = pos + int3(-dx, 0, 0);
+                horizontals[3] = pos + int3(0, 0, -dz);
+                
+                for (int h = 0; h < 4; h++)
+                {
+                    if (InBounds(horizontals[h]) && ReadMatAt(horizontals[h]) == MAT_AIR)
+                    {
+                        moved = TryClaim(horizontals[h], voxel);
+                        if (moved) return;
+                    }
+                }
+            }
+        }
+        
+        // 4. Stay in place
+        if (!moved)
+        {
+            TryClaim(pos, voxel);
+        }
+        return;
+    }
+    
+    // --- Gas Physics (Steam) ---
+    if (physCat == PHYS_GAS)
+    {
+        // Rise up
+        int3 above = pos + int3(0, 1, 0);
+        if (InBounds(above) && ReadMatAt(above) == MAT_AIR)
+        {
+            moved = TryClaim(above, voxel);
+            if (moved) return;
+        }
+        
+        // Diagonal up
+        if (!moved)
+        {
+            int dx = (rng & 1u) ? 1 : -1;
+            int3 diagUp = pos + int3(dx, 1, 0);
+            if (InBounds(diagUp) && ReadMatAt(diagUp) == MAT_AIR)
+            {
+                moved = TryClaim(diagUp, voxel);
+                if (moved) return;
+            }
+        }
+        
+        // Dissipate after some time (based on aux data as lifetime)
+        uint aux = GetAuxData(voxel);
+        if (aux > 200)
+        {
+            // Steam disappears
+            return; // Don't claim any position = disappear
+        }
+        
+        // Increment lifetime
+        if (!moved)
+        {
+            uint newVoxel = SetAuxData(voxel, aux + 1);
+            TryClaim(pos, newVoxel);
+        }
+        return;
+    }
+    
+    // Fallback: claim current position
+    TryClaim(pos, voxel);
+}
