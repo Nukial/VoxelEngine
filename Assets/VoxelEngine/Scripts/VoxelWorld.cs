@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.Rendering;
+using System.Collections.Generic;
 
 namespace VoxelEngine
 {
@@ -9,6 +10,12 @@ namespace VoxelEngine
     /// </summary>
     public class VoxelWorld : MonoBehaviour
     {
+        private struct VoxelWrite
+        {
+            public int index;
+            public uint value;
+        }
+
         [Header("World Configuration")]
         [SerializeField] private int worldSize = 128;
         [SerializeField] private int brickSize = 8;
@@ -625,7 +632,8 @@ namespace VoxelEngine
         public void SetVoxelSphere(Vector3 center, float radius, uint materialId)
         {
             int r = Mathf.CeilToInt(radius);
-            var data = new uint[1];
+            var writes = new List<VoxelWrite>();
+            uint voxelValue = materialId == VoxelData.MAT_AIR ? 0u : VoxelData.PackWithDefaultColor(materialId);
 
             for (int z = -r; z <= r; z++)
             for (int y = -r; y <= r; y++)
@@ -640,10 +648,35 @@ namespace VoxelEngine
                 if (!VoxelData.IsInBounds(pos, worldSize)) continue;
                 if (new Vector3(x, y, z).magnitude > radius) continue;
 
-                uint voxel = materialId == VoxelData.MAT_AIR ? 0 : VoxelData.PackWithDefaultColor(materialId);
                 int idx = VoxelData.Flatten3D(pos, worldSize);
-                data[0] = voxel;
-                ReadBuffer.SetData(data, 0, idx, 1);
+                writes.Add(new VoxelWrite { index = idx, value = voxelValue });
+            }
+
+            if (writes.Count == 0)
+                return;
+
+            writes.Sort((a, b) => a.index.CompareTo(b.index));
+
+            int count = writes.Count;
+            var indices = new int[count];
+            var values = new uint[count];
+            for (int i = 0; i < count; i++)
+            {
+                indices[i] = writes[i].index;
+                values[i] = writes[i].value;
+            }
+
+            int runStart = 0;
+            while (runStart < count)
+            {
+                int runEnd = runStart + 1;
+                while (runEnd < count && indices[runEnd] == indices[runEnd - 1] + 1)
+                    runEnd++;
+
+                int gpuStart = indices[runStart];
+                int runLength = runEnd - runStart;
+                ReadBuffer.SetData(values, runStart, gpuStart, runLength);
+                runStart = runEnd;
             }
         }
 

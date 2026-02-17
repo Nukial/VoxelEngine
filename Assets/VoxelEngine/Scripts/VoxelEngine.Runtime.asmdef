@@ -2,7 +2,9 @@
     "name": "VoxelEngine.Runtime",
     "rootNamespace": "VoxelEngine",
     "references": [
-        "Unity.InputSystem"
+        "Unity.InputSystem",
+        "Unity.Burst",
+        "Unity.Collections"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

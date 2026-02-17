@@ -382,7 +382,7 @@ MonoBehaviour:
   terrainScale: 0.02
   caveScale: 0.06
   caveThreshold: 0.72
-  seed: 42
+  seed: 1938.001
   simulationShader: {fileID: 7200000, guid: 7b7953b379bd04443b3dacca0023703e, type: 3}
   brickMapShader: {fileID: 7200000, guid: 540db8e242e9b5744a1270b882c15b6a, type: 3}
   enableSimulation: 1
@@ -404,6 +404,9 @@ MonoBehaviour:
   stabilizeLightingWhileMoving: 1
   movingShadowIntensity: 0.35
   qualityTransitionSpeed: 6
+  syncWithUnityDirectionalLight: 1
+  directionalLightOverride: {fileID: 1727375046}
+  syncAmbientFromRenderSettings: 0
   ambientColor: {r: 0.15, g: 0.18, b: 0.25, a: 1}
   sunColor: {r: 1, g: 0.95, b: 0.85, a: 1}
   sunIntensity: 1.2

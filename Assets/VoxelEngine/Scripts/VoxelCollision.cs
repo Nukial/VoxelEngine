@@ -1,5 +1,8 @@
 using UnityEngine;
 using System.Collections.Generic;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
 
 namespace VoxelEngine
 {
@@ -10,6 +13,108 @@ namespace VoxelEngine
     [RequireComponent(typeof(MeshCollider))]
     public class VoxelCollision : MonoBehaviour
     {
+        private const uint MatAir = 0u;
+        private const uint MatWater = 5u;
+        private const uint MatLava = 6u;
+        private const uint MatSteam = 14u;
+
+        private struct FaceRecord
+        {
+            public int x;
+            public int y;
+            public int z;
+            public byte face;
+        }
+
+        [BurstCompile]
+        private struct CollectExposedFacesJob : IJobParallelFor
+        {
+            [ReadOnly] public NativeArray<uint> paddedVoxelData;
+            public NativeStream.Writer writer;
+
+            public int worldMinX;
+            public int worldMinY;
+            public int worldMinZ;
+
+            public int sizeX;
+            public int sizeY;
+            public int sizeZ;
+
+            public int paddedSizeX;
+            public int paddedSizeY;
+
+            public void Execute(int index)
+            {
+                writer.BeginForEachIndex(index);
+
+                int xy = sizeX * sizeY;
+                int localZ = index / xy;
+                int rem = index - localZ * xy;
+                int localY = rem / sizeX;
+                int localX = rem - localY * sizeX;
+
+                int px = localX + 1;
+                int py = localY + 1;
+                int pz = localZ + 1;
+                int baseIndex = Flatten3D(px, py, pz, paddedSizeX, paddedSizeY);
+
+                uint mat = paddedVoxelData[baseIndex] & 0xFFu;
+                if (!IsSolid(mat))
+                {
+                    writer.EndForEachIndex();
+                    return;
+                }
+
+                int wx = worldMinX + localX;
+                int wy = worldMinY + localY;
+                int wz = worldMinZ + localZ;
+
+                if (IsAirAt(baseIndex + 1))
+                    WriteFace(wx, wy, wz, 0);
+                if (IsAirAt(baseIndex - 1))
+                    WriteFace(wx, wy, wz, 1);
+                if (IsAirAt(baseIndex + paddedSizeX))
+                    WriteFace(wx, wy, wz, 2);
+                if (IsAirAt(baseIndex - paddedSizeX))
+                    WriteFace(wx, wy, wz, 3);
+
+                int zStride = paddedSizeX * paddedSizeY;
+                if (IsAirAt(baseIndex + zStride))
+                    WriteFace(wx, wy, wz, 4);
+                if (IsAirAt(baseIndex - zStride))
+                    WriteFace(wx, wy, wz, 5);
+
+                writer.EndForEachIndex();
+            }
+
+            private void WriteFace(int x, int y, int z, byte face)
+            {
+                FaceRecord rec;
+                rec.x = x;
+                rec.y = y;
+                rec.z = z;
+                rec.face = face;
+                writer.Write(rec);
+            }
+
+            private bool IsAirAt(int idx)
+            {
+                uint neighborMat = paddedVoxelData[idx] & 0xFFu;
+                return !IsSolid(neighborMat);
+            }
+
+            private static bool IsSolid(uint materialId)
+            {
+                return materialId != MatAir && materialId != MatWater &&
+                       materialId != MatLava && materialId != MatSteam;
+            }
+
+            private static int Flatten3D(int x, int y, int z, int sx, int sy)
+            {
+                return x + y * sx + z * sx * sy;
+            }
+        }
+
         [Header("Configuration")]
         [SerializeField] private VoxelWorld voxelWorld;
         [SerializeField] private Transform trackTarget; // Usually the player
@@ -90,13 +195,77 @@ namespace VoxelEngine
             int minZ = Mathf.Max(0, center.z - collisionRadius);
             int maxZ = Mathf.Min(ws, center.z + collisionRadius);
 
-            // For each of the 6 face directions, run greedy meshing
-            GreedyMeshAxis(minX, maxX, minY, maxY, minZ, maxZ, ws, 0); // +X
-            GreedyMeshAxis(minX, maxX, minY, maxY, minZ, maxZ, ws, 1); // -X
-            GreedyMeshAxis(minX, maxX, minY, maxY, minZ, maxZ, ws, 2); // +Y
-            GreedyMeshAxis(minX, maxX, minY, maxY, minZ, maxZ, ws, 3); // -Y
-            GreedyMeshAxis(minX, maxX, minY, maxY, minZ, maxZ, ws, 4); // +Z
-            GreedyMeshAxis(minX, maxX, minY, maxY, minZ, maxZ, ws, 5); // -Z
+            int sizeX = Mathf.Max(0, maxX - minX);
+            int sizeY = Mathf.Max(0, maxY - minY);
+            int sizeZ = Mathf.Max(0, maxZ - minZ);
+            if (sizeX == 0 || sizeY == 0 || sizeZ == 0)
+            {
+                if (_hasAssignedMesh)
+                {
+                    _meshCollider.sharedMesh = null;
+                    _hasAssignedMesh = false;
+                }
+                return;
+            }
+
+            int paddedSizeX = sizeX + 2;
+            int paddedSizeY = sizeY + 2;
+            int paddedSizeZ = sizeZ + 2;
+            int paddedTotal = paddedSizeX * paddedSizeY * paddedSizeZ;
+
+            var paddedData = new NativeArray<uint>(paddedTotal, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+
+            try
+            {
+                FillPaddedVoxelData(paddedData, paddedSizeX, paddedSizeY, paddedSizeZ,
+                    minX, minY, minZ, ws);
+
+                int voxelCount = sizeX * sizeY * sizeZ;
+                var stream = new NativeStream(voxelCount, Allocator.TempJob);
+
+                try
+                {
+                    var job = new CollectExposedFacesJob
+                    {
+                        paddedVoxelData = paddedData,
+                        writer = stream.AsWriter(),
+                        worldMinX = minX,
+                        worldMinY = minY,
+                        worldMinZ = minZ,
+                        sizeX = sizeX,
+                        sizeY = sizeY,
+                        sizeZ = sizeZ,
+                        paddedSizeX = paddedSizeX,
+                        paddedSizeY = paddedSizeY
+                    };
+
+                    JobHandle handle = job.Schedule(voxelCount, 128);
+                    handle.Complete();
+
+                    var reader = stream.AsReader();
+                    float scale = voxelWorld.VoxelScale;
+                    Vector3 origin = voxelWorld.WorldOrigin;
+
+                    for (int i = 0; i < voxelCount; i++)
+                    {
+                        reader.BeginForEachIndex(i);
+                        while (reader.RemainingItemCount > 0)
+                        {
+                            FaceRecord face = reader.Read<FaceRecord>();
+                            AddFaceQuad(face.x, face.y, face.z, face.face, scale, origin);
+                        }
+                        reader.EndForEachIndex();
+                    }
+                }
+                finally
+                {
+                    stream.Dispose();
+                }
+            }
+            finally
+            {
+                paddedData.Dispose();
+            }
 
             // Update mesh
             if (_vertices.Count == 0 || _triangles.Count == 0)
@@ -119,52 +288,38 @@ namespace VoxelEngine
             _hasAssignedMesh = true;
         }
 
-        private void GreedyMeshAxis(int minX, int maxX, int minY, int maxY, int minZ, int maxZ, int ws, int face)
+        private void FillPaddedVoxelData(
+            NativeArray<uint> paddedData,
+            int paddedSizeX,
+            int paddedSizeY,
+            int paddedSizeZ,
+            int minX,
+            int minY,
+            int minZ,
+            int worldSize)
         {
-            // Face directions:
-            // 0: +X, 1: -X, 2: +Y, 3: -Y, 4: +Z, 5: -Z
-            // For simplicity, generate individual quads for exposed faces
-            // A full greedy meshing would merge adjacent faces, but this is sufficient for collision
-
-            float scale = voxelWorld.VoxelScale;
-            Vector3 origin = voxelWorld.WorldOrigin;
-
-            for (int z = minZ; z < maxZ; z++)
-            for (int y = minY; y < maxY; y++)
-            for (int x = minX; x < maxX; x++)
+            int zStride = paddedSizeX * paddedSizeY;
+            for (int pz = 0; pz < paddedSizeZ; pz++)
             {
-                int idx = VoxelData.Flatten3D(x, y, z, ws);
-                uint mat = VoxelData.GetMaterialId(_readbackData[idx]);
-
-                if (!VoxelData.IsSolid(mat)) continue;
-
-                // Check if this face is exposed (neighbor is air or out of bounds)
-                int nx = x, ny = y, nz = z;
-                switch (face)
+                int wz = minZ + pz - 1;
+                for (int py = 0; py < paddedSizeY; py++)
                 {
-                    case 0: nx = x + 1; break;
-                    case 1: nx = x - 1; break;
-                    case 2: ny = y + 1; break;
-                    case 3: ny = y - 1; break;
-                    case 4: nz = z + 1; break;
-                    case 5: nz = z - 1; break;
-                }
+                    int wy = minY + py - 1;
+                    for (int px = 0; px < paddedSizeX; px++)
+                    {
+                        int wx = minX + px - 1;
+                        int pIdx = px + py * paddedSizeX + pz * zStride;
 
-                bool exposed = false;
-                if (nx < 0 || nx >= ws || ny < 0 || ny >= ws || nz < 0 || nz >= ws)
-                {
-                    exposed = true;
-                }
-                else
-                {
-                    uint neighborMat = VoxelData.GetMaterialId(_readbackData[VoxelData.Flatten3D(nx, ny, nz, ws)]);
-                    exposed = !VoxelData.IsSolid(neighborMat);
-                }
+                        if (wx < 0 || wx >= worldSize || wy < 0 || wy >= worldSize || wz < 0 || wz >= worldSize)
+                        {
+                            paddedData[pIdx] = 0;
+                            continue;
+                        }
 
-                if (!exposed) continue;
-
-                // Add quad for this face
-                AddFaceQuad(x, y, z, face, scale, origin);
+                        int worldIdx = VoxelData.Flatten3D(wx, wy, wz, worldSize);
+                        paddedData[pIdx] = _readbackData[worldIdx];
+                    }
+                }
             }
         }
 
