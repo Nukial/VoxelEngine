@@ -69,6 +69,13 @@ namespace VoxelEngine
         [SerializeField] [Range(0.3f, 1.0f)] private float distanceQualityFactor = 0.6f;
         [SerializeField] private float renderDistanceFadeRatio = 0.8f;
 
+        [Header("Edge Performance")]
+        [SerializeField] private bool enableEdgeLoadGuard = true;
+        [SerializeField] [Min(0.1f)] private float edgeLoadDistance = 8f;
+        [SerializeField] [Range(0.35f, 1.0f)] private float edgeRayStepScale = 0.7f;
+        [SerializeField] [Range(0.2f, 1.0f)] private float edgeShadowStepScale = 0.65f;
+        [SerializeField] private bool useDynamicVolumeCulling = true;
+
         [Header("Adaptive Quality")]
         [SerializeField] private bool enableAdaptiveQuality = true;
         [SerializeField] [Range(64, 512)] private int movingRaySteps = 192;
@@ -144,6 +151,8 @@ namespace VoxelEngine
         private Quaternion _lastCameraRot;
         private Light _cachedDirectionalLight;
         private float _nextDirectionalLightSearchTime;
+        private bool _insideVolumeState;
+        private bool _insideVolumeStateInitialized;
 
         // Properties for external access
         public int WorldSize => worldSize;
@@ -328,6 +337,7 @@ namespace VoxelEngine
 
         private void Initialize()
         {
+            _insideVolumeStateInitialized = false;
             CreateBuffers();
             CacheKernelIDs();
             CreateRenderingComponents();
@@ -678,9 +688,17 @@ namespace VoxelEngine
                 runtimeMaxShadowSteps = Mathf.RoundToInt(Mathf.Lerp(runtimeMaxShadowSteps, gpuShadowTarget, _gpuLoadBlend));
             }
 
-            // Use Cull Off to avoid blind/dead angles caused by dynamic cull
-            // transitions and face winding edge cases on the volume mesh.
-            _rayMarchMaterial.SetFloat(PropCullMode, 0f);
+            if (useDynamicVolumeCulling)
+            {
+                bool insideVolume = GetSmoothedInsideVolumeState();
+                // Outside volume: render front faces only (cull back).
+                // Inside volume: render back faces only (cull front).
+                _rayMarchMaterial.SetFloat(PropCullMode, insideVolume ? 1f : 2f);
+            }
+            else
+            {
+                _rayMarchMaterial.SetFloat(PropCullMode, 0f);
+            }
 
             // Distance-based quality scaling
             var camera = Camera.main;
@@ -697,6 +715,24 @@ namespace VoxelEngine
                 float qualityMult = Mathf.Lerp(1f, distanceQualityFactor, distRatio);
                 runtimeMaxRaySteps = Mathf.Max(64, Mathf.RoundToInt(runtimeMaxRaySteps * qualityMult));
                 runtimeMaxShadowSteps = Mathf.Max(16, Mathf.RoundToInt(runtimeMaxShadowSteps * qualityMult));
+
+                if (enableEdgeLoadGuard)
+                {
+                    bool insideVolume = IsCameraInsideVolume(0f);
+                    if (!insideVolume)
+                    {
+                        float distanceToBounds = GetDistanceToVolumeBounds(camera.transform.position);
+                        float edgeFactor = 1f - Mathf.Clamp01(distanceToBounds / Mathf.Max(0.1f, edgeLoadDistance));
+
+                        if (edgeFactor > 0f)
+                        {
+                            float rayScale = Mathf.Lerp(1f, edgeRayStepScale, edgeFactor);
+                            float shadowScale = Mathf.Lerp(1f, edgeShadowStepScale, edgeFactor);
+                            runtimeMaxRaySteps = Mathf.Max(64, Mathf.RoundToInt(runtimeMaxRaySteps * rayScale));
+                            runtimeMaxShadowSteps = Mathf.Max(16, Mathf.RoundToInt(runtimeMaxShadowSteps * shadowScale));
+                        }
+                    }
+                }
             }
 
             _rayMarchMaterial.SetBuffer(PropVoxelBuffer, ReadBuffer);
@@ -783,16 +819,53 @@ namespace VoxelEngine
         /// Check if the main camera is inside the voxel volume bounding box.
         /// Used to switch cull mode for correct rendering.
         /// </summary>
-        private bool IsCameraInsideVolume()
+        private bool IsCameraInsideVolume(float margin = 0.5f)
         {
             var cam = Camera.main;
             if (cam == null) return false;
             Vector3 local = cam.transform.position - WorldOrigin;
             float ext = WorldExtent;
-            float margin = 0.5f; // small margin for smooth transition
             return local.x >= -margin && local.x <= ext + margin &&
                    local.y >= -margin && local.y <= ext + margin &&
                    local.z >= -margin && local.z <= ext + margin;
+        }
+
+        private bool GetSmoothedInsideVolumeState()
+        {
+            const float insideMargin = 0.2f;
+            const float outsideMargin = 0.8f;
+
+            if (!_insideVolumeStateInitialized)
+            {
+                _insideVolumeState = IsCameraInsideVolume(insideMargin);
+                _insideVolumeStateInitialized = true;
+                return _insideVolumeState;
+            }
+
+            if (_insideVolumeState)
+            {
+                if (!IsCameraInsideVolume(outsideMargin))
+                    _insideVolumeState = false;
+            }
+            else
+            {
+                if (IsCameraInsideVolume(insideMargin))
+                    _insideVolumeState = true;
+            }
+
+            return _insideVolumeState;
+        }
+
+        private float GetDistanceToVolumeBounds(Vector3 worldPos)
+        {
+            Vector3 min = WorldOrigin;
+            Vector3 max = WorldOrigin + Vector3.one * WorldExtent;
+
+            float dx = Mathf.Max(Mathf.Max(min.x - worldPos.x, 0f), worldPos.x - max.x);
+            float dy = Mathf.Max(Mathf.Max(min.y - worldPos.y, 0f), worldPos.y - max.y);
+            float dz = Mathf.Max(Mathf.Max(min.z - worldPos.z, 0f), worldPos.z - max.z);
+
+            return Mathf.Sqrt(dx * dx + dy * dy + dz * dz);
         }
 
         /// <summary>
@@ -1103,6 +1176,7 @@ namespace VoxelEngine
             _cpuReadbackRequestPending = false;
             _cpuReadbackReady = false;
             _kernelsCached = false;
+            _insideVolumeStateInitialized = false;
 
             if (_rayMarchMaterial != null)
             {
@@ -1147,6 +1221,9 @@ namespace VoxelEngine
             fastLightingDistanceRatio = Mathf.Clamp(fastLightingDistanceRatio, 0.2f, 0.9f);
             shadowRayDistanceRatio = Mathf.Clamp(shadowRayDistanceRatio, 0.15f, 0.8f);
             gpuTargetFrameRate = Mathf.Clamp(gpuTargetFrameRate, 30f, 165f);
+            edgeLoadDistance = Mathf.Max(0.1f, edgeLoadDistance);
+            edgeRayStepScale = Mathf.Clamp(edgeRayStepScale, 0.35f, 1f);
+            edgeShadowStepScale = Mathf.Clamp(edgeShadowStepScale, 0.2f, 1f);
 
             if (worldSize % brickSize != 0)
                 brickSize = 8;
