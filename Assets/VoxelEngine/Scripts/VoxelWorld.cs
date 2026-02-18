@@ -121,7 +121,10 @@ namespace VoxelEngine
         // Frame counter for simulation randomness
         private uint _frameCount;
         private uint _simStep;
-        private uint[] _cpuReadbackCache;
+        private const int CpuReadbackSlotCount = 2;
+        private uint[][] _cpuReadbackSlots = new uint[CpuReadbackSlotCount][];
+        private int _cpuReadbackFrontSlot;
+        private int _cpuReadbackInFlightSlot = -1;
         private float _lastCpuReadbackTime = -999f;
         private bool _cpuReadbackReady;
         private bool _cpuReadbackRequestPending;
@@ -243,36 +246,67 @@ namespace VoxelEngine
         {
             if (ReadBuffer == null) return;
 
-            if (_cpuReadbackCache == null || _cpuReadbackCache.Length != TotalVoxels)
-            {
-                _cpuReadbackCache = new uint[TotalVoxels];
-                _cpuReadbackReady = false;
-            }
-
+            EnsureCpuReadbackSlots();
             if (Time.time - _lastCpuReadbackTime < cpuReadbackInterval) return;
 
             if (!useAsyncCpuReadback)
             {
-                ReadBuffer.GetData(_cpuReadbackCache);
+                ReadBuffer.GetData(_cpuReadbackSlots[_cpuReadbackFrontSlot]);
                 _cpuReadbackReady = true;
                 _lastCpuReadbackTime = Time.time;
                 return;
             }
 
-            if (_cpuReadbackRequestPending) return;
+            RequestAsyncCpuReadback(force: false);
+        }
 
+        private void EnsureCpuReadbackSlots()
+        {
+            int total = TotalVoxels;
+            bool resized = false;
+
+            for (int i = 0; i < CpuReadbackSlotCount; i++)
+            {
+                if (_cpuReadbackSlots[i] == null || _cpuReadbackSlots[i].Length != total)
+                {
+                    _cpuReadbackSlots[i] = new uint[total];
+                    resized = true;
+                }
+            }
+
+            if (resized)
+                _cpuReadbackReady = false;
+        }
+
+        private void RequestAsyncCpuReadback(bool force)
+        {
+            if (ReadBuffer == null) return;
+            if (_cpuReadbackRequestPending) return;
+            if (!force && Time.time - _lastCpuReadbackTime < cpuReadbackInterval) return;
+
+            int targetSlot = 1 - _cpuReadbackFrontSlot;
             _cpuReadbackRequestPending = true;
+            _cpuReadbackInFlightSlot = targetSlot;
             _lastCpuReadbackTime = Time.time;
             AsyncGPUReadback.Request(ReadBuffer, (request) =>
             {
                 _cpuReadbackRequestPending = false;
+                int slotIndex = _cpuReadbackInFlightSlot;
+                _cpuReadbackInFlightSlot = -1;
+
                 if (!this || request.hasError) return;
+                if (slotIndex < 0 || slotIndex >= CpuReadbackSlotCount) return;
 
                 var data = request.GetData<uint>();
-                if (_cpuReadbackCache == null || _cpuReadbackCache.Length != data.Length)
-                    _cpuReadbackCache = new uint[data.Length];
+                var slot = _cpuReadbackSlots[slotIndex];
+                if (slot == null || slot.Length != data.Length)
+                {
+                    slot = new uint[data.Length];
+                    _cpuReadbackSlots[slotIndex] = slot;
+                }
 
-                data.CopyTo(_cpuReadbackCache);
+                data.CopyTo(slot);
+                _cpuReadbackFrontSlot = slotIndex;
                 _cpuReadbackReady = true;
             });
         }
@@ -851,27 +885,34 @@ namespace VoxelEngine
         {
             if (ReadBuffer == null) return null;
 
-            if (_cpuReadbackCache == null || _cpuReadbackCache.Length != TotalVoxels)
-                _cpuReadbackCache = new uint[TotalVoxels];
+            EnsureCpuReadbackSlots();
 
             if (!Application.isPlaying)
             {
-                ReadBuffer.GetData(_cpuReadbackCache);
+                ReadBuffer.GetData(_cpuReadbackSlots[_cpuReadbackFrontSlot]);
                 _cpuReadbackReady = true;
-                return _cpuReadbackCache;
+                return _cpuReadbackSlots[_cpuReadbackFrontSlot];
             }
 
-            if (forceRefresh && !_cpuReadbackRequestPending)
+            if (!useAsyncCpuReadback)
             {
-                ReadBuffer.GetData(_cpuReadbackCache);
-                _cpuReadbackReady = true;
-                _lastCpuReadbackTime = Time.time;
+                if (forceRefresh || Time.time - _lastCpuReadbackTime >= cpuReadbackInterval)
+                {
+                    ReadBuffer.GetData(_cpuReadbackSlots[_cpuReadbackFrontSlot]);
+                    _cpuReadbackReady = true;
+                    _lastCpuReadbackTime = Time.time;
+                }
+            }
+            else if (forceRefresh)
+            {
+                // Force new async request without blocking CPU on GPU completion.
+                RequestAsyncCpuReadback(force: true);
             }
 
             if (!_cpuReadbackReady)
                 return null;
 
-            return _cpuReadbackCache;
+            return _cpuReadbackSlots[_cpuReadbackFrontSlot];
         }
 
         /// <summary>
@@ -1013,7 +1054,12 @@ namespace VoxelEngine
             _voxelBufferA = null;
             _voxelBufferB = null;
             _brickMapBuffer = null;
-            _cpuReadbackCache = null;
+            for (int i = 0; i < CpuReadbackSlotCount; i++)
+                _cpuReadbackSlots[i] = null;
+            _cpuReadbackFrontSlot = 0;
+            _cpuReadbackInFlightSlot = -1;
+            _cpuReadbackRequestPending = false;
+            _cpuReadbackReady = false;
             _kernelsCached = false;
 
             if (_rayMarchMaterial != null)
