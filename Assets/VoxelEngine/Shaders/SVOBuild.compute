@@ -1,0 +1,88 @@
+// ============================================================================
+// SVOBuild.compute
+// Builds a hierarchical Sparse Voxel Octree (occupancy mipmap) from the
+// brick-level occupancy data (level 0 of the SVO buffer).
+//
+// The SVO buffer layout (contiguous):
+//   Level 0: BrickMapSize³ entries  (1 brick  = BrickSize³ voxels)
+//   Level 1: (BrickMapSize/2)³      (1 cell   = 2³ bricks)
+//   Level 2: (BrickMapSize/4)³      (1 cell   = 4³ bricks)
+//   Level 3: (BrickMapSize/8)³      (1 cell   = 8³ bricks)
+//   ...up to grid size 2³ or 1³
+//
+// Each entry stores 0 (all-empty) or non-zero (has content).
+//
+// Kernel BuildSVOLevel:
+//   Reads 2×2×2 children from the previous (finer) level and writes
+//   OR-reduced result to the current level.
+//   Dispatched once per upper level, from level 1 upwards.
+// ============================================================================
+
+#pragma kernel BuildSVOLevel
+#pragma kernel ClearDirtyFlags
+
+RWStructuredBuffer<uint> _SVOBuffer;
+RWStructuredBuffer<uint> _BrickDirtyFlags;
+
+int _SrcLevelOffset;   // Byte offset (in uints) of the source (finer) level
+int _DstLevelOffset;   // Byte offset (in uints) of the destination (coarser) level
+int _SrcGridSize;      // Grid dimension of the source level (e.g. 16 for level 0)
+int _DstGridSize;      // Grid dimension of the destination level (e.g. 8 for level 1)
+int _BrickMapSize;     // Total brick grid size (level 0 grid size)
+
+int Flatten(int3 pos, int size)
+{
+    return pos.x + pos.y * size + pos.z * size * size;
+}
+
+// ============================================================================
+// BuildSVOLevel: reduce 2×2×2 children → 1 parent
+// Dispatch with (_DstGridSize, _DstGridSize, _DstGridSize) groups of (1,1,1)
+// or a 1D dispatch with ceil(DstGridSize³ / 64) groups of 64 threads.
+// We use 3D dispatch: one thread per destination cell.
+// ============================================================================
+
+[numthreads(4, 4, 4)]
+void BuildSVOLevel(uint3 id : SV_DispatchThreadID)
+{
+    int3 dstPos = int3(id);
+    if (any(dstPos >= _DstGridSize))
+        return;
+
+    int3 srcBase = dstPos * 2;
+    uint result = 0;
+
+    // OR together 2×2×2 children from the source level
+    [unroll]
+    for (int z = 0; z < 2; z++)
+    {
+        [unroll]
+        for (int y = 0; y < 2; y++)
+        {
+            [unroll]
+            for (int x = 0; x < 2; x++)
+            {
+                int3 srcPos = srcBase + int3(x, y, z);
+                if (all(srcPos < _SrcGridSize))
+                {
+                    result |= _SVOBuffer[_SrcLevelOffset + Flatten(srcPos, _SrcGridSize)];
+                }
+            }
+        }
+    }
+
+    _SVOBuffer[_DstLevelOffset + Flatten(dstPos, _DstGridSize)] = result;
+}
+
+// ============================================================================
+// ClearDirtyFlags: reset all brick dirty flags to 0
+// Dispatch with ceil(BrickMapSize³ / 256) groups
+// ============================================================================
+
+[numthreads(256, 1, 1)]
+void ClearDirtyFlags(uint3 id : SV_DispatchThreadID)
+{
+    uint total = (uint)_BrickMapSize * (uint)_BrickMapSize * (uint)_BrickMapSize;
+    if (id.x < total)
+        _BrickDirtyFlags[id.x] = 0u;
+}

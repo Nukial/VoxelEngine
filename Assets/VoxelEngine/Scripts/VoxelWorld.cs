@@ -38,6 +38,7 @@ namespace VoxelEngine
         [Header("Simulation")]
         [SerializeField] private ComputeShader simulationShader;
         [SerializeField] private ComputeShader brickMapShader;
+        [SerializeField] private ComputeShader svoBuildShader;
         [SerializeField] private bool enableSimulation = true;
         [SerializeField] [Range(1, 8)] private int simulationStepsPerFrame = 1;
         [SerializeField] [Range(5f, 120f)] private float simulationTickRate = 30f;
@@ -100,8 +101,16 @@ namespace VoxelEngine
         // GPU Buffers
         private GraphicsBuffer _voxelBufferA;
         private GraphicsBuffer _voxelBufferB;
-        private GraphicsBuffer _brickMapBuffer;
+        private GraphicsBuffer _svoBuffer;           // Hierarchical occupancy (SVO mip chain)
+        private GraphicsBuffer _brickDirtyFlagsBuffer; // Per-brick dirty flags
         private bool _pingPong;
+
+        // SVO hierarchy info
+        private int _svoLevelCount;
+        private int[] _svoLevelOffsets;  // offset into _svoBuffer for each level
+        private int[] _svoGridSizes;     // grid dimension at each level
+        private int _svoTotalEntries;
+        private bool _worldDirty;        // global flag: need brick map + SVO rebuild
 
         // Rendering
         private Material _rayMarchMaterial;
@@ -114,6 +123,10 @@ namespace VoxelEngine
         private int _simKernel;
         private int _simClearKernel;
         private int _brickMapKernel;
+        private int _brickMapDirtyKernel;
+        private int _markAllDirtyKernel;
+        private int _svoBuildLevelKernel;
+        private int _svoClearDirtyKernel;
         private int _heatLightKernel;
         private int _lightOnlyKernel;
         private int _copyKernel;
@@ -148,7 +161,7 @@ namespace VoxelEngine
         public int TotalVoxels => worldSize * worldSize * worldSize;
         public GraphicsBuffer ReadBuffer => _pingPong ? _voxelBufferB : _voxelBufferA;
         public GraphicsBuffer WriteBuffer => _pingPong ? _voxelBufferA : _voxelBufferB;
-        public GraphicsBuffer BrickMapBuffer => _brickMapBuffer;
+        public GraphicsBuffer SVOBuffer => _svoBuffer;
         public Vector3 WorldOrigin => transform.position;
         public float WorldExtent => worldSize * voxelScale;
         public VoxelIndirectInstanceRenderer IndirectInstanceRenderer => indirectInstanceRenderer;
@@ -156,6 +169,16 @@ namespace VoxelEngine
         // Shader property IDs (cached)
         private static readonly int PropVoxelBuffer = Shader.PropertyToID("_VoxelBuffer");
         private static readonly int PropBrickMap = Shader.PropertyToID("_BrickMap");
+        private static readonly int PropSVOBuffer = Shader.PropertyToID("_SVOBuffer");
+        private static readonly int PropBrickDirtyFlags = Shader.PropertyToID("_BrickDirtyFlags");
+        private static readonly int PropSVOLevel0Offset = Shader.PropertyToID("_SVOLevel0Offset");
+        private static readonly int PropSVOLevelOffsets = Shader.PropertyToID("_SVOLevelOffsets");
+        private static readonly int PropSVOLevelOffsets2 = Shader.PropertyToID("_SVOLevelOffsets2");
+        private static readonly int PropSVOLevelCount = Shader.PropertyToID("_SVOLevelCount");
+        private static readonly int PropSrcLevelOffset = Shader.PropertyToID("_SrcLevelOffset");
+        private static readonly int PropDstLevelOffset = Shader.PropertyToID("_DstLevelOffset");
+        private static readonly int PropSrcGridSize = Shader.PropertyToID("_SrcGridSize");
+        private static readonly int PropDstGridSize = Shader.PropertyToID("_DstGridSize");
         private static readonly int PropWorldSize = Shader.PropertyToID("_WorldSize");
         private static readonly int PropBrickSize = Shader.PropertyToID("_BrickSize");
         private static readonly int PropBrickMapSize = Shader.PropertyToID("_BrickMapSize");
@@ -217,7 +240,14 @@ namespace VoxelEngine
             {
                 bool simulated = RunScheduledSimulation();
                 if (simulated)
-                    UpdateBrickMap();
+                    _worldDirty = true;
+            }
+
+            // Only rebuild brick map + SVO when something changed
+            if (_worldDirty)
+            {
+                UpdateBrickMapAndSVO(fullRebuild: false);
+                _worldDirty = false;
             }
 
             // Update rendering properties
@@ -330,7 +360,51 @@ namespace VoxelEngine
                 runStart = runEnd;
             }
 
+            // Mark dirty flags for affected bricks (CPU-side)
+            MarkDirtyBricksForWrites();
+
             _pendingWrites.Clear();
+        }
+
+        /// <summary>
+        /// Marks brick dirty flags for all pending writes. Called before clearing
+        /// the write queue so we know which bricks need SVO updates.
+        /// </summary>
+        private void MarkDirtyBricksForWrites()
+        {
+            if (_brickDirtyFlagsBuffer == null || _pendingWrites.Count == 0) return;
+
+            // Collect unique brick indices
+            var dirtyBricks = new HashSet<int>();
+            int bms = BrickMapSize;
+            foreach (var w in _pendingWrites)
+            {
+                Vector3Int vpos = VoxelData.Unflatten3D(w.index, worldSize);
+                Vector3Int bpos = new Vector3Int(vpos.x / brickSize, vpos.y / brickSize, vpos.z / brickSize);
+                if (bpos.x >= 0 && bpos.x < bms && bpos.y >= 0 && bpos.y < bms && bpos.z >= 0 && bpos.z < bms)
+                    dirtyBricks.Add(VoxelData.Flatten3D(bpos, bms));
+            }
+
+            if (dirtyBricks.Count == 0) return;
+
+            // Upload dirty flags
+            var ones = new uint[dirtyBricks.Count];
+            var indices = new int[dirtyBricks.Count];
+            int i = 0;
+            foreach (var bi in dirtyBricks)
+            {
+                ones[i] = 1u;
+                indices[i] = bi;
+                i++;
+            }
+
+            // Set each dirty brick individually (small count, no contiguous guarantee)
+            foreach (var bi in dirtyBricks)
+            {
+                _brickDirtyFlagsBuffer.SetData(new uint[] { 1u }, 0, bi, 1);
+            }
+
+            _worldDirty = true;
         }
 
         // =====================================================================
@@ -343,7 +417,8 @@ namespace VoxelEngine
             CacheKernelIDs();
             CreateRenderingComponents();
             GenerateTerrain();
-            UpdateBrickMap();
+            MarkAllBricksDirty();
+            UpdateBrickMapAndSVO(fullRebuild: true);
             UpdateRenderProperties();
         }
 
@@ -361,7 +436,17 @@ namespace VoxelEngine
             }
 
             if (brickMapShader != null)
+            {
                 _brickMapKernel = brickMapShader.FindKernel("UpdateBrickMap");
+                _brickMapDirtyKernel = brickMapShader.FindKernel("UpdateBrickMapDirtyOnly");
+                _markAllDirtyKernel = brickMapShader.FindKernel("MarkAllBricksDirty");
+            }
+
+            if (svoBuildShader != null)
+            {
+                _svoBuildLevelKernel = svoBuildShader.FindKernel("BuildSVOLevel");
+                _svoClearDirtyKernel = svoBuildShader.FindKernel("ClearDirtyFlags");
+            }
 
             _kernelsCached = true;
         }
@@ -369,20 +454,41 @@ namespace VoxelEngine
         private void CreateBuffers()
         {
             int total = TotalVoxels;
-            int brickTotal = BrickMapSize * BrickMapSize * BrickMapSize;
+            int bms = BrickMapSize;
+            int brickTotal = bms * bms * bms;
 
             _voxelBufferA = new GraphicsBuffer(GraphicsBuffer.Target.Structured, total, sizeof(uint));
             _voxelBufferB = new GraphicsBuffer(GraphicsBuffer.Target.Structured, total, sizeof(uint));
-            _brickMapBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, brickTotal, sizeof(uint));
 
-            // Brick map is small (~16 KB); clear with managed array.
-            // Voxel buffers are fully overwritten by terrain generation
-            // and the subsequent GPU CopyBuffer dispatch, so no
-            // managed-array allocation is needed to zero them.
-            var clearBrick = new uint[brickTotal];
-            _brickMapBuffer.SetData(clearBrick);
+            // --- Compute SVO level offsets ---
+            // Level 0 = brick map (bms³), level 1 = (bms/2)³, ... until grid size < 2
+            var offsets = new System.Collections.Generic.List<int>();
+            var gridSizes = new System.Collections.Generic.List<int>();
+            int offset = 0;
+            int gs = bms;
+            while (gs >= 2)
+            {
+                offsets.Add(offset);
+                gridSizes.Add(gs);
+                offset += gs * gs * gs;
+                gs /= 2;
+            }
+            _svoLevelCount = offsets.Count;
+            _svoLevelOffsets = offsets.ToArray();
+            _svoGridSizes = gridSizes.ToArray();
+            _svoTotalEntries = offset;
+
+            _svoBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Mathf.Max(1, _svoTotalEntries), sizeof(uint));
+            _brickDirtyFlagsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, brickTotal, sizeof(uint));
+
+            // Clear SVO and dirty flags
+            var clearSVO = new uint[_svoTotalEntries];
+            _svoBuffer.SetData(clearSVO);
+            var clearDirty = new uint[brickTotal];
+            _brickDirtyFlagsBuffer.SetData(clearDirty);
 
             Debug.Log($"[VoxelWorld] Created buffers: {worldSize}³ = {total:N0} voxels ({total * 4 / 1024f / 1024f:F1} MB per buffer)");
+            Debug.Log($"[VoxelWorld] SVO hierarchy: {_svoLevelCount} levels, {_svoTotalEntries} total entries");
         }
 
         private void CreateRenderingComponents()
@@ -540,7 +646,10 @@ namespace VoxelEngine
             // Phase 2: Simulate (movement + chemical reactions)
             simulationShader.SetBuffer(_simKernel, PropReadBuffer, readBuf);
             simulationShader.SetBuffer(_simKernel, PropWriteBuffer, writeBuf);
+            simulationShader.SetBuffer(_simKernel, PropBrickDirtyFlags, _brickDirtyFlagsBuffer);
             simulationShader.SetInt(PropWorldSize, worldSize);
+            simulationShader.SetInt(PropBrickSize, brickSize);
+            simulationShader.SetInt(PropBrickMapSize, BrickMapSize);
             simulationShader.SetInt(PropFrameCount, (int)_frameCount);
             simulationShader.SetInt(PropSimStep, (int)_simStep);
             simulationShader.Dispatch(_simKernel, simGroups, simGroups, simGroups);
@@ -549,7 +658,10 @@ namespace VoxelEngine
             // The kernel writes every position (air=0), so no separate clear needed.
             simulationShader.SetBuffer(_heatLightKernel, PropReadBuffer, writeBuf);
             simulationShader.SetBuffer(_heatLightKernel, PropWriteBuffer, readBuf);
+            simulationShader.SetBuffer(_heatLightKernel, PropBrickDirtyFlags, _brickDirtyFlagsBuffer);
             simulationShader.SetInt(PropWorldSize, worldSize);
+            simulationShader.SetInt(PropBrickSize, brickSize);
+            simulationShader.SetInt(PropBrickMapSize, BrickMapSize);
             simulationShader.SetInt(PropFrameCount, (int)_frameCount);
             ApplyFireSimulationTuning(_heatLightKernel);
             simulationShader.Dispatch(_heatLightKernel, simGroups, simGroups, simGroups);
@@ -632,21 +744,87 @@ namespace VoxelEngine
         }
 
         // =====================================================================
-        // Brick Map
+        // Brick Map + SVO Hierarchy
         // =====================================================================
 
-        private void UpdateBrickMap()
+        /// <summary>
+        /// Mark all bricks as dirty (used after terrain generation or bulk edits).
+        /// </summary>
+        private void MarkAllBricksDirty()
         {
-            if (brickMapShader == null) return;
+            if (brickMapShader == null || _brickDirtyFlagsBuffer == null) return;
             CacheKernelIDs();
 
-            brickMapShader.SetBuffer(_brickMapKernel, PropVoxelBuffer, ReadBuffer);
-            brickMapShader.SetBuffer(_brickMapKernel, PropBrickMap, _brickMapBuffer);
-            brickMapShader.SetInt(PropWorldSize, worldSize);
-            brickMapShader.SetInt(PropBrickSize, brickSize);
+            brickMapShader.SetBuffer(_markAllDirtyKernel, PropBrickDirtyFlags, _brickDirtyFlagsBuffer);
             brickMapShader.SetInt(PropBrickMapSize, BrickMapSize);
+            int groups = Mathf.CeilToInt(BrickMapSize * BrickMapSize * BrickMapSize / 256f);
+            brickMapShader.Dispatch(_markAllDirtyKernel, groups, 1, 1);
+            _worldDirty = true;
+        }
 
-            brickMapShader.Dispatch(_brickMapKernel, BrickMapSize, BrickMapSize, BrickMapSize);
+        /// <summary>
+        /// Updates the brick map (SVO level 0) and rebuilds the SVO upper levels.
+        /// If fullRebuild is true, processes ALL bricks. Otherwise, only dirty bricks.
+        /// </summary>
+        private void UpdateBrickMapAndSVO(bool fullRebuild)
+        {
+            if (brickMapShader == null || _svoBuffer == null) return;
+            CacheKernelIDs();
+
+            int bms = BrickMapSize;
+
+            if (fullRebuild)
+            {
+                // Process all bricks unconditionally
+                brickMapShader.SetBuffer(_brickMapKernel, PropVoxelBuffer, ReadBuffer);
+                brickMapShader.SetBuffer(_brickMapKernel, PropSVOBuffer, _svoBuffer);
+                brickMapShader.SetBuffer(_brickMapKernel, PropBrickDirtyFlags, _brickDirtyFlagsBuffer);
+                brickMapShader.SetInt(PropWorldSize, worldSize);
+                brickMapShader.SetInt(PropBrickSize, brickSize);
+                brickMapShader.SetInt(PropBrickMapSize, bms);
+                brickMapShader.SetInt(PropSVOLevel0Offset, _svoLevelOffsets[0]);
+                brickMapShader.Dispatch(_brickMapKernel, bms, bms, bms);
+            }
+            else
+            {
+                // Only process dirty bricks (dirty-only kernel)
+                brickMapShader.SetBuffer(_brickMapDirtyKernel, PropVoxelBuffer, ReadBuffer);
+                brickMapShader.SetBuffer(_brickMapDirtyKernel, PropSVOBuffer, _svoBuffer);
+                brickMapShader.SetBuffer(_brickMapDirtyKernel, PropBrickDirtyFlags, _brickDirtyFlagsBuffer);
+                brickMapShader.SetInt(PropWorldSize, worldSize);
+                brickMapShader.SetInt(PropBrickSize, brickSize);
+                brickMapShader.SetInt(PropBrickMapSize, bms);
+                brickMapShader.SetInt(PropSVOLevel0Offset, _svoLevelOffsets[0]);
+                brickMapShader.Dispatch(_brickMapDirtyKernel, bms, bms, bms);
+            }
+
+            // Build SVO upper levels (level 1, 2, 3, ...) from level 0
+            BuildSVOUpperLevels();
+        }
+
+        /// <summary>
+        /// Builds SVO upper levels by reducing each level from the one below.
+        /// Upper levels are tiny so always fully rebuilt.
+        /// </summary>
+        private void BuildSVOUpperLevels()
+        {
+            if (svoBuildShader == null || _svoBuffer == null) return;
+            CacheKernelIDs();
+
+            for (int level = 1; level < _svoLevelCount; level++)
+            {
+                int srcGridSize = _svoGridSizes[level - 1];
+                int dstGridSize = _svoGridSizes[level];
+
+                svoBuildShader.SetBuffer(_svoBuildLevelKernel, PropSVOBuffer, _svoBuffer);
+                svoBuildShader.SetInt(PropSrcLevelOffset, _svoLevelOffsets[level - 1]);
+                svoBuildShader.SetInt(PropDstLevelOffset, _svoLevelOffsets[level]);
+                svoBuildShader.SetInt(PropSrcGridSize, srcGridSize);
+                svoBuildShader.SetInt(PropDstGridSize, dstGridSize);
+
+                int groups = Mathf.CeilToInt(dstGridSize / 4f);
+                svoBuildShader.Dispatch(_svoBuildLevelKernel, groups, groups, groups);
+            }
         }
 
         // =====================================================================
@@ -705,7 +883,7 @@ namespace VoxelEngine
             }
 
             _rayMarchMaterial.SetBuffer(PropVoxelBuffer, ReadBuffer);
-            _rayMarchMaterial.SetBuffer(PropBrickMap, _brickMapBuffer);
+            _rayMarchMaterial.SetBuffer(PropSVOBuffer, _svoBuffer);
             _rayMarchMaterial.SetInt(PropWorldSize, worldSize);
             _rayMarchMaterial.SetInt(PropBrickSize, brickSize);
             _rayMarchMaterial.SetInt(PropBrickMapSize, BrickMapSize);
@@ -720,6 +898,20 @@ namespace VoxelEngine
             _rayMarchMaterial.SetFloat(PropSunIntensity, sunIntensity);
             _rayMarchMaterial.SetFloat(PropFogDensity, fogDensity);
             _rayMarchMaterial.SetColor(PropFogColor, fogColor);
+
+            // Set SVO level offsets for shader
+            _rayMarchMaterial.SetVector(PropSVOLevelOffsets, new Vector4(
+                _svoLevelCount > 0 ? _svoLevelOffsets[0] : 0,
+                _svoLevelCount > 1 ? _svoLevelOffsets[1] : 0,
+                _svoLevelCount > 2 ? _svoLevelOffsets[2] : 0,
+                _svoLevelCount > 3 ? _svoLevelOffsets[3] : 0
+            ));
+            _rayMarchMaterial.SetVector(PropSVOLevelOffsets2, new Vector4(
+                _svoLevelCount > 4 ? _svoLevelOffsets[4] : 0,
+                _svoLevelCount > 5 ? _svoLevelOffsets[5] : 0,
+                0, 0
+            ));
+            _rayMarchMaterial.SetInt(PropSVOLevelCount, _svoLevelCount);
 
             // Shadow: always keep keyword ON, use _ShadowStrength for smooth transition
             float shadowStr = 1f;
@@ -1051,14 +1243,17 @@ namespace VoxelEngine
         {
             _voxelBufferA?.Release();
             _voxelBufferB?.Release();
-            _brickMapBuffer?.Release();
+            _svoBuffer?.Release();
+            _brickDirtyFlagsBuffer?.Release();
             _voxelBufferA = null;
             _voxelBufferB = null;
-            _brickMapBuffer = null;
+            _svoBuffer = null;
+            _brickDirtyFlagsBuffer = null;
             _cpuReadbackCache = null;
             _pendingWrites.Clear();
             _pendingWriteValues = null;
             _kernelsCached = false;
+            _worldDirty = false;
 
             if (_rayMarchMaterial != null)
             {

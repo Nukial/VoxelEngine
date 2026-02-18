@@ -15,8 +15,11 @@
 
 StructuredBuffer<uint>   _ReadBuffer;
 RWStructuredBuffer<uint> _WriteBuffer;
+RWStructuredBuffer<uint> _BrickDirtyFlags;
 
 int _WorldSize;
+int _BrickSize;
+int _BrickMapSize;
 uint _FrameCount;
 uint _SimStep;
 
@@ -56,15 +59,34 @@ uint ReadMatAt(int3 pos)
     return GetMaterialId(ReadAt(pos));
 }
 
+// Mark the brick containing a voxel position as dirty.
+// Uses atomic OR so multiple threads can mark safely.
+void MarkBrickDirty(int3 voxelPos)
+{
+    uint3 brickPosU = (uint3)voxelPos / (uint3)_BrickSize;
+    int3 brickPos = int3(brickPosU);
+    if (all(brickPos >= 0) && all(brickPos < _BrickMapSize))
+    {
+        int brickIdx = Flatten3D(brickPos, _BrickMapSize);
+        InterlockedOr(_BrickDirtyFlags[brickIdx], 1u);
+    }
+}
+
 // Try to claim a position in write buffer using Atomic CAS
 // Returns true if successfully claimed
+// Also marks the target brick as dirty on success.
 bool TryClaim(int3 pos, uint voxel)
 {
     if (!InBounds(pos)) return false;
     
     uint original;
     InterlockedCompareExchange(_WriteBuffer[Idx(pos)], 0u, voxel, original);
-    return original == 0u;
+    if (original == 0u)
+    {
+        MarkBrickDirty(pos);
+        return true;
+    }
+    return false;
 }
 
 // Pseudo-random direction selection based on position and frame
@@ -458,6 +480,7 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
         uint coalVoxel = PackVoxel(MAT_COAL, 0, 0);
         coalVoxel = SetTempAndLight(coalVoxel, max(newTemp, 9u), max(newTemp > 4u ? newTemp - 4u : 0u, 3u));
         _WriteBuffer[Idx(pos)] = coalVoxel;
+        MarkBrickDirty(pos); // material changed
         return;
     }
     
@@ -465,6 +488,7 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
     {
         // Leaves burn out quickly.
         _WriteBuffer[Idx(pos)] = 0;
+        MarkBrickDirty(pos); // voxel removed
         return;
     }
 
@@ -476,6 +500,7 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
         if (burnOutRoll == 0u)
         {
             _WriteBuffer[Idx(pos)] = 0;
+            MarkBrickDirty(pos); // voxel removed
             return;
         }
     }
@@ -486,6 +511,7 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
         uint waterVoxel = PackVoxel(MAT_WATER, 0, 0);
         waterVoxel = SetTempAndLight(waterVoxel, 0, 0);
         _WriteBuffer[Idx(pos)] = waterVoxel;
+        MarkBrickDirty(pos); // material changed
         return;
     }
     
@@ -495,6 +521,7 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
         uint steamVoxel = PackVoxel(MAT_STEAM, 0, 0);
         steamVoxel = SetTempAndLight(steamVoxel, 0, 0);
         _WriteBuffer[Idx(pos)] = steamVoxel;
+        MarkBrickDirty(pos); // material changed
         return;
     }
     

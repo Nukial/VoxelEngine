@@ -51,7 +51,7 @@ Shader "VoxelEngine/RayMarch"
             
             // --- Buffers ---
             StructuredBuffer<uint> _VoxelBuffer;
-            StructuredBuffer<uint> _BrickMap;
+            StructuredBuffer<uint> _SVOBuffer;
             
             // --- Parameters (set from C#) ---
             int _WorldSize;
@@ -61,6 +61,11 @@ Shader "VoxelEngine/RayMarch"
             float3 _WorldOrigin;   // World-space origin of the voxel volume
             int _MaxSteps;
             int _MaxShadowSteps;
+            
+            // SVO hierarchy parameters
+            int4 _SVOLevelOffsets;   // offsets for levels 0-3
+            int2 _SVOLevelOffsets2;  // offsets for levels 4-5
+            int _SVOLevelCount;      // number of valid levels
             
             // Lighting
             float4 _AmbientColor;
@@ -153,30 +158,50 @@ Shader "VoxelEngine/RayMarch"
                 return _VoxelBuffer[Flatten3D(pos, _WorldSize)];
             }
             
-            bool IsBrickEmpty(int3 brickPos)
+            // --- SVO Hierarchical Empty-Space Query ---
+            // Returns the level offset for a given SVO level (0-5)
+            int GetSVOLevelOffset(int level)
             {
-                if (any(brickPos < 0) || any(brickPos >= _BrickMapSize))
-                    return true;
-                return _BrickMap[Flatten3D(brickPos, _BrickMapSize)] == 0;
+                if (level < 4) 
+                {
+                    // _SVOLevelOffsets.xyzw for levels 0-3
+                    if (level == 0) return _SVOLevelOffsets.x;
+                    if (level == 1) return _SVOLevelOffsets.y;
+                    if (level == 2) return _SVOLevelOffsets.z;
+                    return _SVOLevelOffsets.w;
+                }
+                if (level == 4) return _SVOLevelOffsets2.x;
+                return _SVOLevelOffsets2.y;
             }
             
-            // Check a 2x2x2 super-brick (4 bricks along each axis combined)
-            // Returns true if all 8 child bricks are empty — allows larger jumps
-            bool IsSuperBrickEmpty(int3 superPos)
+            // Attempt hierarchical empty-space skip from coarsest to finest SVO level.
+            // Returns the voxel-space cell size to skip, or 0 if no skip is possible.
+            int TrySVOSkip(int3 pos)
             {
-                int3 baseBrick = superPos * 2;
+                // Check from coarsest level down to level 0 (brick level)
+                // Stop at the first empty level found (biggest skip possible)
+                int bestCellSize = 0;
+                
                 [unroll]
-                for (int z = 0; z < 2; z++)
-                [unroll]
-                for (int y = 0; y < 2; y++)
-                [unroll]
-                for (int x = 0; x < 2; x++)
+                for (int level = MAX_SVO_LEVELS - 1; level >= 0; level--)
                 {
-                    int3 bp = baseBrick + int3(x, y, z);
-                    if (!IsBrickEmpty(bp))
-                        return false;
+                    if (level >= _SVOLevelCount) continue;
+                    if (bestCellSize > 0) continue; // already found a skip
+                    
+                    int cellVoxelSize = _BrickSize << level;
+                    int gridSize = _WorldSize / cellVoxelSize;
+                    int3 cellPos = pos / cellVoxelSize;
+                    
+                    if (any(cellPos < 0) || any(cellPos >= gridSize)) continue;
+                    
+                    int levelOffset = GetSVOLevelOffset(level);
+                    if (_SVOBuffer[levelOffset + Flatten3D(cellPos, gridSize)] == 0)
+                    {
+                        bestCellSize = cellVoxelSize;
+                    }
                 }
-                return true;
+                
+                return bestCellSize;
             }
             
             // --- World <-> Voxel Space Conversion ---
@@ -281,58 +306,29 @@ Shader "VoxelEngine/RayMarch"
                     if (currentT > tNear + maxVoxelDist)
                         break;
                     
-                    // Hierarchical empty-space skip: try super-brick (2x2x2 bricks) first
-                    int3 brickPos = pos / _BrickSize;
-                    int3 superPos = brickPos / 2;
-                    int superBrickVoxelSize = _BrickSize * 2;
+                    // --- SVO Hierarchical Empty-Space Skip ---
+                    // Try from coarsest to finest level; skip at the biggest empty cell
+                    int skipCellSize = TrySVOSkip(pos);
                     
-                    if (IsSuperBrickEmpty(superPos))
+                    if (skipCellSize > 0)
                     {
-                        // Skip entire 2x2x2 super-brick region
-                        float3 sbMinF = float3(superPos * superBrickVoxelSize);
-                        float3 sbMaxF = sbMinF + float(superBrickVoxelSize);
+                        // Compute the cell bounds and jump the ray past it
+                        int3 cellPos = pos / skipCellSize;
+                        float3 cellMinF = float3(cellPos * skipCellSize);
+                        float3 cellMaxF = cellMinF + float(skipCellSize);
                         
-                        float3 tExit0 = (sbMinF - origin) * invDir;
-                        float3 tExit1 = (sbMaxF - origin) * invDir;
+                        float3 tExit0 = (cellMinF - origin) * invDir;
+                        float3 tExit1 = (cellMaxF - origin) * invDir;
                         float3 tFarAxis = max(tExit0, tExit1);
-                        float tSBExit = min(min(tFarAxis.x, tFarAxis.y), tFarAxis.z);
+                        float tCellExit = min(min(tFarAxis.x, tFarAxis.y), tFarAxis.z);
                         
-                        if (tSBExit == tFarAxis.x) normal = float3(-stepDir.x, 0, 0);
-                        else if (tSBExit == tFarAxis.y) normal = float3(0, -stepDir.y, 0);
+                        if (tCellExit == tFarAxis.x) normal = float3(-stepDir.x, 0, 0);
+                        else if (tCellExit == tFarAxis.y) normal = float3(0, -stepDir.y, 0);
                         else normal = float3(0, 0, -stepDir.z);
                         
-                        float3 jumpPos = origin + safeDir * (tSBExit + 0.001);
+                        float3 jumpPos = origin + safeDir * (tCellExit + 0.001);
                         pos = int3(floor(jumpPos));
                         
-                        nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
-                        nextBound.y = stepDir.y > 0 ? float(pos.y + 1) : float(pos.y);
-                        nextBound.z = stepDir.z > 0 ? float(pos.z + 1) : float(pos.z);
-                        tMax = (nextBound - origin) * invDir;
-                        
-                        continue;
-                    }
-                    else if (IsBrickEmpty(brickPos))
-                    {
-                        // Skip entire brick - compute ray exit from this brick
-                        float3 brickMinF = float3(brickPos * _BrickSize);
-                        float3 brickMaxF = brickMinF + float(_BrickSize);
-                        
-                        float3 tExit0 = (brickMinF - origin) * invDir;
-                        float3 tExit1 = (brickMaxF - origin) * invDir;
-                        float3 tFarAxis = max(tExit0, tExit1);
-                        float tBrickExit = min(min(tFarAxis.x, tFarAxis.y), tFarAxis.z);
-                        
-                        // Determine exit normal
-                        if (tBrickExit == tFarAxis.x) normal = float3(-stepDir.x, 0, 0);
-                        else if (tBrickExit == tFarAxis.y) normal = float3(0, -stepDir.y, 0);
-                        else normal = float3(0, 0, -stepDir.z);
-                        
-                        // Jump past the brick
-                        float tJump = tBrickExit + 0.001;
-                        float3 jumpPos = origin + safeDir * tJump;
-                        pos = int3(floor(jumpPos));
-                        
-                        // Recompute tMax from new position
                         nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
                         nextBound.y = stepDir.y > 0 ? float(pos.y + 1) : float(pos.y);
                         nextBound.z = stepDir.z > 0 ? float(pos.z + 1) : float(pos.z);
@@ -491,39 +487,21 @@ Shader "VoxelEngine/RayMarch"
                     if (shadowT > maxShadowVoxelDist)
                         return false;
                     
-                    // Super-brick skip for shadow rays too
-                    int3 brickPos = pos / _BrickSize;
-                    int3 sBrickPos = brickPos / 2;
-                    int sBrickVS = _BrickSize * 2;
+                    // SVO hierarchical empty-space skip for shadow rays
+                    int skipCellSize = TrySVOSkip(pos);
                     
-                    if (IsSuperBrickEmpty(sBrickPos))
+                    if (skipCellSize > 0)
                     {
-                        float3 sbMin = float3(sBrickPos * sBrickVS);
-                        float3 sbMax = sbMin + float(sBrickVS);
-                        float3 tE0 = (sbMin - origin) * invDir;
-                        float3 tE1 = (sbMax - origin) * invDir;
+                        int3 cellPos = pos / skipCellSize;
+                        float3 cellMinF = float3(cellPos * skipCellSize);
+                        float3 cellMaxF = cellMinF + float(skipCellSize);
+                        
+                        float3 tE0 = (cellMinF - origin) * invDir;
+                        float3 tE1 = (cellMaxF - origin) * invDir;
                         float3 tFA = max(tE0, tE1);
-                        float tSBE = min(min(tFA.x, tFA.y), tFA.z);
+                        float tCellExit = min(min(tFA.x, tFA.y), tFA.z);
                         
-                        float3 jumpPos = origin + safeDir * (tSBE + 0.001);
-                        pos = int3(floor(jumpPos));
-                        
-                        nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
-                        nextBound.y = stepDir.y > 0 ? float(pos.y + 1) : float(pos.y);
-                        nextBound.z = stepDir.z > 0 ? float(pos.z + 1) : float(pos.z);
-                        tMax = (nextBound - origin) * invDir;
-                        continue;
-                    }
-                    else if (IsBrickEmpty(brickPos))
-                    {
-                        float3 brickMinF = float3(brickPos * _BrickSize);
-                        float3 brickMaxF = brickMinF + float(_BrickSize);
-                        float3 tExit0 = (brickMinF - origin) * invDir;
-                        float3 tExit1 = (brickMaxF - origin) * invDir;
-                        float3 tFarAxis = max(tExit0, tExit1);
-                        float tBrickExit = min(min(tFarAxis.x, tFarAxis.y), tFarAxis.z);
-                        
-                        float3 jumpPos = origin + safeDir * (tBrickExit + 0.001);
+                        float3 jumpPos = origin + safeDir * (tCellExit + 0.001);
                         pos = int3(floor(jumpPos));
                         
                         nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
@@ -819,7 +797,7 @@ Shader "VoxelEngine/RayMarch"
             #include "VoxelCommon.hlsl"
             
             StructuredBuffer<uint> _VoxelBuffer;
-            StructuredBuffer<uint> _BrickMap;
+            StructuredBuffer<uint> _SVOBuffer;
             
             int _WorldSize;
             int _BrickSize;
@@ -828,6 +806,11 @@ Shader "VoxelEngine/RayMarch"
             float3 _WorldOrigin;
             int _MaxSteps;
             float _MaxRenderDist;
+            
+            // SVO hierarchy parameters
+            int4 _SVOLevelOffsets;
+            int2 _SVOLevelOffsets2;
+            int _SVOLevelCount;
             
             struct Attributes { float4 positionOS : POSITION; };
             struct Varyings 
@@ -869,22 +852,39 @@ Shader "VoxelEngine/RayMarch"
                 return _VoxelBuffer[Flatten3D(pos, _WorldSize)];
             }
             
-            bool IsBrickEmpty(int3 bp)
+            // SVO helpers for depth pass (same logic as forward pass)
+            int GetSVOLevelOffset_Depth(int level)
             {
-                if (any(bp < 0) || any(bp >= _BrickMapSize)) return true;
-                return _BrickMap[Flatten3D(bp, _BrickMapSize)] == 0;
+                if (level == 0) return _SVOLevelOffsets.x;
+                if (level == 1) return _SVOLevelOffsets.y;
+                if (level == 2) return _SVOLevelOffsets.z;
+                if (level == 3) return _SVOLevelOffsets.w;
+                if (level == 4) return _SVOLevelOffsets2.x;
+                return _SVOLevelOffsets2.y;
             }
             
-            bool IsSuperBrickEmpty(int3 sbp)
+            int TrySVOSkip_Depth(int3 pos)
             {
-                for (int dz = 0; dz < 2; dz++)
-                for (int dy = 0; dy < 2; dy++)
-                for (int dx = 0; dx < 2; dx++)
+                int bestCellSize = 0;
+                [unroll]
+                for (int level = MAX_SVO_LEVELS - 1; level >= 0; level--)
                 {
-                    int3 bp = sbp * 2 + int3(dx, dy, dz);
-                    if (!IsBrickEmpty(bp)) return false;
+                    if (level >= _SVOLevelCount) continue;
+                    if (bestCellSize > 0) continue;
+                    
+                    int cellVoxelSize = _BrickSize << level;
+                    int gridSize = _WorldSize / cellVoxelSize;
+                    int3 cellPos = pos / cellVoxelSize;
+                    
+                    if (any(cellPos < 0) || any(cellPos >= gridSize)) continue;
+                    
+                    int levelOffset = GetSVOLevelOffset_Depth(level);
+                    if (_SVOBuffer[levelOffset + Flatten3D(cellPos, gridSize)] == 0)
+                    {
+                        bestCellSize = cellVoxelSize;
+                    }
                 }
-                return true;
+                return bestCellSize;
             }
             
             bool IntersectAABB_Depth(float3 ro, float3 rd, float3 bmin, float3 bmax, out float tN, out float tF)
@@ -946,37 +946,24 @@ Shader "VoxelEngine/RayMarch"
                     float curT = min(min(tMax.x, tMax.y), tMax.z);
                     if (curT > tNear + maxVoxelDist) break;
                     
-                    int3 bp = pos/_BrickSize;
-                    int3 sbp = bp / 2;
-                    int sBrickVS = _BrickSize * 2;
+                    // SVO hierarchical empty-space skip
+                    int skipCellSize = TrySVOSkip_Depth(pos);
                     
-                    if (IsSuperBrickEmpty(sbp))
+                    if (skipCellSize > 0)
                     {
-                        float3 sbMin = float3(sbp * sBrickVS);
-                        float3 sbMax = sbMin + float(sBrickVS);
-                        float3 tE0 = (sbMin - origin) * invDir;
-                        float3 tE1 = (sbMax - origin) * invDir;
+                        int3 cellPos = pos / skipCellSize;
+                        float3 cellMinF = float3(cellPos * skipCellSize);
+                        float3 cellMaxF = cellMinF + float(skipCellSize);
+                        float3 tE0 = (cellMinF - origin) * invDir;
+                        float3 tE1 = (cellMaxF - origin) * invDir;
                         float3 tFA = max(tE0, tE1);
-                        float tSBE = min(min(tFA.x, tFA.y), tFA.z);
-                        float3 jp = origin + safeDir * (tSBE + 0.001);
+                        float tCellExit = min(min(tFA.x, tFA.y), tFA.z);
+                        float3 jp = origin + safeDir * (tCellExit + 0.001);
                         pos = int3(floor(jp));
                         nextBound.x = stepDir.x>0 ? float(pos.x+1) : float(pos.x);
                         nextBound.y = stepDir.y>0 ? float(pos.y+1) : float(pos.y);
                         nextBound.z = stepDir.z>0 ? float(pos.z+1) : float(pos.z);
                         tMax = (nextBound - origin) * invDir;
-                        continue;
-                    }
-                    else if (IsBrickEmpty(bp))
-                    {
-                        float3 bMinF=float3(bp*_BrickSize), bMaxF=bMinF+float(_BrickSize);
-                        float3 te0=(bMinF-origin)*invDir, te1=(bMaxF-origin)*invDir;
-                        float tBE=min(min(max(te0.x,te1.x),max(te0.y,te1.y)),max(te0.z,te1.z));
-                        float3 jp=origin+safeDir*(tBE+0.001);
-                        pos=int3(floor(jp));
-                        nextBound.x=stepDir.x>0?float(pos.x+1):float(pos.x);
-                        nextBound.y=stepDir.y>0?float(pos.y+1):float(pos.y);
-                        nextBound.z=stepDir.z>0?float(pos.z+1):float(pos.z);
-                        tMax=(nextBound-origin)*invDir;
                         continue;
                     }
                     

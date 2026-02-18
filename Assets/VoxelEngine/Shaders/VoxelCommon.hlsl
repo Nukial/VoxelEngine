@@ -252,4 +252,33 @@ float HashToFloat(uint h)
     return float(h & 0xFFFF) / 65535.0;
 }
 
+// ============================================================================
+// SVO (Sparse Voxel Octree) Hierarchical Occupancy Helpers
+// The SVO buffer stores a mip-chain of brick-level occupancy.
+//   Level 0 = BrickMapSize³   (1 cell = BrickSize voxels)
+//   Level 1 = (BrickMapSize/2)³ (1 cell = BrickSize*2 voxels)
+//   Level N = (BrickMapSize/2^N)³
+// Each entry is 0 (empty) or non-zero (has content).
+//
+// _SVOLevelOffsets.x/y/z/w = offsets for levels 0–3
+// _SVOLevelOffsets2.x/y    = offsets for levels 4–5 (if needed)
+// _SVOLevelCount           = number of valid levels
+// ============================================================================
+
+// Maximum SVO levels supported (covers BrickMapSize up to 64)
+#define MAX_SVO_LEVELS 6
+
+// Check if an SVO cell at a given level is empty.
+// Returns true if the cell is completely empty (can be skipped during raymarching).
+// svoBuffer  : the SVO buffer
+// cellPos    : position in the grid at this level
+// gridSize   : grid dimension at this level
+// levelOffset: offset into svoBuffer for this level
+bool IsSVOCellEmpty(StructuredBuffer<uint> svoBuffer, int3 cellPos, int gridSize, int levelOffset)
+{
+    if (any(cellPos < 0) || any(cellPos >= gridSize))
+        return true;
+    return svoBuffer[levelOffset + Flatten3D(cellPos, gridSize)] == 0;
+}
+
 #endif // VOXEL_COMMON_INCLUDED
