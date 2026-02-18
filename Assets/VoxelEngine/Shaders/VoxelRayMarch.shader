@@ -15,6 +15,8 @@ Shader "VoxelEngine/RayMarch"
         _FogColor ("Fog Color", Color) = (0.6, 0.75, 0.9, 1)
         _MaxRenderDist ("Max Render Distance", Float) = 80
         _ShadowStrength ("Shadow Strength", Range(0, 1)) = 1.0
+        _FastLightingMaxDist ("Fast Lighting Max Distance", Float) = 40
+        _ShadowRayMaxDist ("Shadow Ray Max Distance", Float) = 32
         
         [Header(Culling)]
         [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull Mode", Float) = 1
@@ -75,6 +77,8 @@ Shader "VoxelEngine/RayMarch"
             
             // View distance
             float _MaxRenderDist;
+            float _FastLightingMaxDist;
+            float _ShadowRayMaxDist;
             
             // Shadow blending
             float _ShadowStrength;
@@ -474,7 +478,7 @@ Shader "VoxelEngine/RayMarch"
                 float3 tDelta = abs(invDir);
                 
                 // Limit shadow rays to a shorter distance for performance
-                float maxShadowVoxelDist = min(_MaxRenderDist / max(_VoxelScale, 0.001) * 0.5, 64.0);
+                float maxShadowVoxelDist = min(_ShadowRayMaxDist / max(_VoxelScale, 0.001), 64.0);
                 
                 float3 nextBound;
                 nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
@@ -558,7 +562,7 @@ Shader "VoxelEngine/RayMarch"
             // --- Shade a single voxel surface ---
             
             float3 ShadeVoxel(int3 voxelPos, float3 normal, uint voxelData,
-                              float3 voxelDir, float3 L)
+                              float3 voxelDir, float3 L, float viewDist)
             {
                 uint matId = GetMaterialId(voxelData);
                 uint color565 = GetColor565(voxelData);
@@ -577,6 +581,7 @@ Shader "VoxelEngine/RayMarch"
                 float3 N = normalize(normal);
                 float3 V = normalize(-voxelDir);
                 float3 H = normalize(L + V);
+                bool useFullLighting = viewDist <= max(_FastLightingMaxDist, 1.0);
                 
                 // Diffuse
                 float NdotL = max(dot(N, L), 0.0);
@@ -592,7 +597,7 @@ Shader "VoxelEngine/RayMarch"
                 float shadowFactor = 1.0;
                 #ifdef VOXEL_SHADOWS_ON
                 {
-                    if (_ShadowStrength > 0.001 && NdotL > 0.001)
+                    if (useFullLighting && _ShadowStrength > 0.001 && NdotL > 0.001)
                     {
                         float3 shadowOrigin = float3(voxelPos) + 0.5 + normal * 1.2 + L * 0.15;
                         if (CastShadowRay(shadowOrigin, L, _MaxShadowSteps))
@@ -606,27 +611,30 @@ Shader "VoxelEngine/RayMarch"
                 
                 // AO
                 float ao = 1.0;
-                int3 aoPos = voxelPos + int3(normal);
-                int aoCount = 0;
-                [unroll]
-                for (int dx = -1; dx <= 1; dx++)
+                if (useFullLighting)
                 {
+                    int3 aoPos = voxelPos + int3(normal);
+                    int aoCount = 0;
                     [unroll]
-                    for (int dz = -1; dz <= 1; dz++)
+                    for (int dx = -1; dx <= 1; dx++)
                     {
-                        int3 checkPos;
-                        if (abs(normal.y) > 0.5)
-                            checkPos = aoPos + int3(dx, 0, dz);
-                        else if (abs(normal.x) > 0.5)
-                            checkPos = aoPos + int3(0, dx, dz);
-                        else
-                            checkPos = aoPos + int3(dx, dz, 0);
-                        
-                        if (IsInBounds(checkPos, _WorldSize) && GetMaterialId(ReadVoxel(checkPos)) != MAT_AIR)
-                            aoCount++;
+                        [unroll]
+                        for (int dz = -1; dz <= 1; dz++)
+                        {
+                            int3 checkPos;
+                            if (abs(normal.y) > 0.5)
+                                checkPos = aoPos + int3(dx, 0, dz);
+                            else if (abs(normal.x) > 0.5)
+                                checkPos = aoPos + int3(0, dx, dz);
+                            else
+                                checkPos = aoPos + int3(dx, dz, 0);
+                            
+                            if (IsInBounds(checkPos, _WorldSize) && GetMaterialId(ReadVoxel(checkPos)) != MAT_AIR)
+                                aoCount++;
+                        }
                     }
+                    ao = 1.0 - aoCount * 0.06;
                 }
-                ao = 1.0 - aoCount * 0.06;
                 
                 // Combine lighting
                 float3 ambient = _AmbientColor.rgb * ao;
@@ -729,7 +737,8 @@ Shader "VoxelEngine/RayMarch"
                 if (opaqueOpacity >= 1.0)
                 {
                     // We have an opaque surface behind transparent layers
-                    opaqueColor = ShadeVoxel(hit.voxelPos, hit.normal, hit.voxelData, voxelDir, L);
+                    opaqueColor = ShadeVoxel(hit.voxelPos, hit.normal, hit.voxelData, voxelDir, L,
+                                             distance(camPos, VoxelToWorld(float3(hit.voxelPos) + 0.5)));
                     depthWorldPos = VoxelToWorld(float3(hit.voxelPos) + 0.5);
                 }
                 else

@@ -80,6 +80,14 @@ namespace VoxelEngine
         [SerializeField] [Range(0.1f, 0.5f)] private float movingShadowIntensity = 0.35f;
         [SerializeField] [Range(2f, 15f)] private float qualityTransitionSpeed = 6f;
 
+        [Header("GPU Load Adaptive")]
+        [SerializeField] private bool enableGpuAdaptiveQuality = true;
+        [SerializeField] [Range(30f, 165f)] private float gpuTargetFrameRate = 60f;
+        [SerializeField] [Range(0.35f, 0.95f)] private float gpuRayStepFloor = 0.58f;
+        [SerializeField] [Range(0.2f, 0.9f)] private float gpuShadowStepFloor = 0.45f;
+        [SerializeField] [Range(0.2f, 0.9f)] private float fastLightingDistanceRatio = 0.52f;
+        [SerializeField] [Range(0.15f, 0.8f)] private float shadowRayDistanceRatio = 0.45f;
+
         [Header("Lighting")]
         [SerializeField] private bool syncWithUnityDirectionalLight = true;
         [SerializeField] private Light directionalLightOverride;
@@ -132,6 +140,7 @@ namespace VoxelEngine
         private bool _cameraPosInitialized;
         private float _simulationAccumulator;
         private float _motionBlend; // 0=still, 1=moving, smoothly interpolated
+        private float _gpuLoadBlend; // 0=light GPU load, 1=GPU saturated
         private Quaternion _lastCameraRot;
         private Light _cachedDirectionalLight;
         private float _nextDirectionalLightSearchTime;
@@ -177,6 +186,8 @@ namespace VoxelEngine
         private static readonly int PropMaxRenderDist = Shader.PropertyToID("_MaxRenderDist");
         private static readonly int PropCullMode = Shader.PropertyToID("_Cull");
         private static readonly int PropShadowStrength = Shader.PropertyToID("_ShadowStrength");
+        private static readonly int PropFastLightingMaxDist = Shader.PropertyToID("_FastLightingMaxDist");
+        private static readonly int PropShadowRayMaxDist = Shader.PropertyToID("_ShadowRayMaxDist");
         private static readonly int PropFireSpreadNeighborTemp = Shader.PropertyToID("_FireSpreadNeighborTemp");
         private static readonly int PropWoodCharTemp = Shader.PropertyToID("_WoodCharTemp");
         private static readonly int PropLeafBurnTemp = Shader.PropertyToID("_LeafBurnTemp");
@@ -634,6 +645,18 @@ namespace VoxelEngine
             int runtimeMaxRaySteps = maxRaySteps;
             int runtimeMaxShadowSteps = maxShadowSteps;
 
+            if (enableGpuAdaptiveQuality)
+            {
+                float targetFrameTime = 1f / Mathf.Max(1f, gpuTargetFrameRate);
+                float smoothedFrame = Mathf.Max(Time.smoothDeltaTime, Time.deltaTime);
+                float gpuPressure = Mathf.Clamp01((smoothedFrame - targetFrameTime) / Mathf.Max(targetFrameTime * 0.8f, 0.0001f));
+                _gpuLoadBlend = Mathf.Lerp(_gpuLoadBlend, gpuPressure, Time.deltaTime * qualityTransitionSpeed * 0.7f);
+            }
+            else
+            {
+                _gpuLoadBlend = 0f;
+            }
+
             if (enableAdaptiveQuality && _motionBlend > 0f)
             {
                 // Smoothly blend ray steps between full quality and moving quality
@@ -645,6 +668,14 @@ namespace VoxelEngine
                 movingShadowTarget = Mathf.Max(movingShadowTarget, shadowFloor);
                 runtimeMaxShadowSteps = Mathf.RoundToInt(
                     Mathf.Lerp(maxShadowSteps, movingShadowTarget, _motionBlend));
+            }
+
+            if (enableGpuAdaptiveQuality && _gpuLoadBlend > 0f)
+            {
+                int gpuRayTarget = Mathf.Max(64, Mathf.RoundToInt(maxRaySteps * gpuRayStepFloor));
+                int gpuShadowTarget = Mathf.Max(8, Mathf.RoundToInt(maxShadowSteps * gpuShadowStepFloor));
+                runtimeMaxRaySteps = Mathf.RoundToInt(Mathf.Lerp(runtimeMaxRaySteps, gpuRayTarget, _gpuLoadBlend));
+                runtimeMaxShadowSteps = Mathf.RoundToInt(Mathf.Lerp(runtimeMaxShadowSteps, gpuShadowTarget, _gpuLoadBlend));
             }
 
             // Use Cull Off to avoid blind/dead angles caused by dynamic cull
@@ -678,6 +709,17 @@ namespace VoxelEngine
             _rayMarchMaterial.SetInt(PropMaxSteps, runtimeMaxRaySteps);
             _rayMarchMaterial.SetInt(PropMaxShadowSteps, runtimeMaxShadowSteps);
             _rayMarchMaterial.SetFloat(PropMaxRenderDist, maxRenderDistance);
+
+            float fastLightingDist = Mathf.Max(6f, maxRenderDistance * fastLightingDistanceRatio);
+            float shadowRayMaxDist = Mathf.Max(4f, maxRenderDistance * shadowRayDistanceRatio);
+            if (enableGpuAdaptiveQuality && _gpuLoadBlend > 0f)
+            {
+                fastLightingDist *= Mathf.Lerp(1f, 0.55f, _gpuLoadBlend);
+                shadowRayMaxDist *= Mathf.Lerp(1f, 0.5f, _gpuLoadBlend);
+            }
+
+            _rayMarchMaterial.SetFloat(PropFastLightingMaxDist, fastLightingDist);
+            _rayMarchMaterial.SetFloat(PropShadowRayMaxDist, shadowRayMaxDist);
             _rayMarchMaterial.SetVector(PropSunDir, sunDirection.normalized);
             _rayMarchMaterial.SetColor(PropSunColor, sunColor);
             _rayMarchMaterial.SetColor(PropAmbientColor, ambientColor);
@@ -1100,6 +1142,11 @@ namespace VoxelEngine
             worldSize = Mathf.ClosestPowerOfTwo(Mathf.Clamp(worldSize, 32, 512));
             brickSize = Mathf.Clamp(brickSize, 4, 16);
             movingShadowStepFloor = Mathf.Clamp01(movingShadowStepFloor);
+            gpuRayStepFloor = Mathf.Clamp(gpuRayStepFloor, 0.35f, 0.95f);
+            gpuShadowStepFloor = Mathf.Clamp(gpuShadowStepFloor, 0.2f, 0.9f);
+            fastLightingDistanceRatio = Mathf.Clamp(fastLightingDistanceRatio, 0.2f, 0.9f);
+            shadowRayDistanceRatio = Mathf.Clamp(shadowRayDistanceRatio, 0.15f, 0.8f);
+            gpuTargetFrameRate = Mathf.Clamp(gpuTargetFrameRate, 30f, 165f);
 
             if (worldSize % brickSize != 0)
                 brickSize = 8;
