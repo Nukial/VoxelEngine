@@ -477,8 +477,8 @@ Shader "VoxelEngine/RayMarch"
                 float3 invDir = 1.0 / safeDir;
                 float3 tDelta = abs(invDir);
                 
-                // Limit shadow rays to a shorter distance for performance
-                float maxShadowVoxelDist = min(_ShadowRayMaxDist / max(_VoxelScale, 0.001), 64.0);
+                // Limit shadow rays to configured distance (in voxel space)
+                float maxShadowVoxelDist = _ShadowRayMaxDist / max(_VoxelScale, 0.001);
                 
                 float3 nextBound;
                 nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
@@ -581,7 +581,11 @@ Shader "VoxelEngine/RayMarch"
                 float3 N = normalize(normal);
                 float3 V = normalize(-voxelDir);
                 float3 H = normalize(L + V);
-                bool useFullLighting = viewDist <= max(_FastLightingMaxDist, 1.0);
+                // Smooth transition for lighting detail instead of hard cutoff
+                // to eliminate flickering at the shadow/lighting boundary
+                float fadeDist = max(_FastLightingMaxDist, 1.0);
+                float fadeStart = fadeDist * 0.75;
+                float lightingDetail = 1.0 - saturate((viewDist - fadeStart) / max(fadeDist - fadeStart, 0.01));
                 
                 // Diffuse
                 float NdotL = max(dot(N, L), 0.0);
@@ -593,25 +597,26 @@ Shader "VoxelEngine/RayMarch"
                                       (matId == MAT_IRON || matId == MAT_GOLD) ? 0.4 : 0.08;
                 float spec = pow(NdotH, _SpecularPower) * specIntensity;
                 
-                // Shadow
+                // Shadow with smooth distance fade
                 float shadowFactor = 1.0;
                 #ifdef VOXEL_SHADOWS_ON
                 {
-                    if (useFullLighting && _ShadowStrength > 0.001 && NdotL > 0.001)
+                    if (lightingDetail > 0.01 && _ShadowStrength > 0.001 && NdotL > 0.001)
                     {
                         float3 shadowOrigin = float3(voxelPos) + 0.5 + normal * 1.2 + L * 0.15;
                         if (CastShadowRay(shadowOrigin, L, _MaxShadowSteps))
                         {
-                            float shadowDarkness = lerp(1.0, 0.25, _ShadowStrength);
+                            float effectiveStrength = _ShadowStrength * lightingDetail;
+                            float shadowDarkness = lerp(1.0, 0.25, effectiveStrength);
                             shadowFactor = shadowDarkness;
                         }
                     }
                 }
                 #endif
                 
-                // AO
+                // AO with smooth distance fade
                 float ao = 1.0;
-                if (useFullLighting)
+                if (lightingDetail > 0.01)
                 {
                     int3 aoPos = voxelPos + int3(normal);
                     int aoCount = 0;
@@ -633,7 +638,7 @@ Shader "VoxelEngine/RayMarch"
                                 aoCount++;
                         }
                     }
-                    ao = 1.0 - aoCount * 0.06;
+                    ao = lerp(1.0, 1.0 - aoCount * 0.06, lightingDetail);
                 }
                 
                 // Combine lighting

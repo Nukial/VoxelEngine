@@ -153,6 +153,9 @@ namespace VoxelEngine
         private float _nextDirectionalLightSearchTime;
         private bool _insideVolumeState;
         private bool _insideVolumeStateInitialized;
+        private float _smoothedShadowRayMaxDist;
+        private float _smoothedFastLightingMaxDist;
+        private bool _smoothedShadowParamsInit;
 
         // Properties for external access
         public int WorldSize => worldSize;
@@ -338,6 +341,7 @@ namespace VoxelEngine
         private void Initialize()
         {
             _insideVolumeStateInitialized = false;
+            _smoothedShadowParamsInit = false;
             CreateBuffers();
             CacheKernelIDs();
             CreateRenderingComponents();
@@ -435,7 +439,7 @@ namespace VoxelEngine
             var mesh = new Mesh();
             mesh.name = "VoxelVolume";
 
-            const float m = 0.03f; // margin
+            const float m = 0.12f; // margin - large enough to prevent near-plane clipping
             float lo = -m;
             float hi = 1f + m;
 
@@ -690,10 +694,12 @@ namespace VoxelEngine
 
             if (useDynamicVolumeCulling)
             {
-                bool insideVolume = GetSmoothedInsideVolumeState();
-                // Outside volume: render front faces only (cull back).
-                // Inside volume: render back faces only (cull front).
-                _rayMarchMaterial.SetFloat(PropCullMode, insideVolume ? 1f : 2f);
+                // Always cull front faces (render back faces only).
+                // For a convex box mesh, back faces project to the same screen
+                // pixels as front faces from any viewpoint, so ray-marching works
+                // correctly from both inside and outside the volume without needing
+                // to switch cull modes (which caused terrain to vanish near edges).
+                _rayMarchMaterial.SetFloat(PropCullMode, 1f);
             }
             else
             {
@@ -754,8 +760,22 @@ namespace VoxelEngine
                 shadowRayMaxDist *= Mathf.Lerp(1f, 0.5f, _gpuLoadBlend);
             }
 
-            _rayMarchMaterial.SetFloat(PropFastLightingMaxDist, fastLightingDist);
-            _rayMarchMaterial.SetFloat(PropShadowRayMaxDist, shadowRayMaxDist);
+            // Temporal smoothing to prevent shadow/lighting boundary flickering
+            if (!_smoothedShadowParamsInit)
+            {
+                _smoothedFastLightingMaxDist = fastLightingDist;
+                _smoothedShadowRayMaxDist = shadowRayMaxDist;
+                _smoothedShadowParamsInit = true;
+            }
+            else
+            {
+                float shadowSmoothSpeed = Time.deltaTime * qualityTransitionSpeed * 0.35f;
+                _smoothedFastLightingMaxDist = Mathf.Lerp(_smoothedFastLightingMaxDist, fastLightingDist, shadowSmoothSpeed);
+                _smoothedShadowRayMaxDist = Mathf.Lerp(_smoothedShadowRayMaxDist, shadowRayMaxDist, shadowSmoothSpeed);
+            }
+
+            _rayMarchMaterial.SetFloat(PropFastLightingMaxDist, _smoothedFastLightingMaxDist);
+            _rayMarchMaterial.SetFloat(PropShadowRayMaxDist, _smoothedShadowRayMaxDist);
             _rayMarchMaterial.SetVector(PropSunDir, sunDirection.normalized);
             _rayMarchMaterial.SetColor(PropSunColor, sunColor);
             _rayMarchMaterial.SetColor(PropAmbientColor, ambientColor);
@@ -1177,6 +1197,7 @@ namespace VoxelEngine
             _cpuReadbackReady = false;
             _kernelsCached = false;
             _insideVolumeStateInitialized = false;
+            _smoothedShadowParamsInit = false;
 
             if (_rayMarchMaterial != null)
             {
