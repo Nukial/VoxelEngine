@@ -183,9 +183,15 @@ namespace VoxelEngine
         {
             if (voxelWorld.ReadBuffer == null) return;
 
-            // Shared throttled readback from VoxelWorld
-            _readbackData = voxelWorld.GetCpuVoxelData();
-            if (_readbackData == null) return;
+            // ---- Fast path: read from CPU NativeArray directly (no managed copy) ----
+            bool useCpuNative = voxelWorld.TryGetCpuVoxelNativeData(out NativeArray<uint> cpuVoxelNative);
+
+            if (!useCpuNative)
+            {
+                // Fallback: GPU readback via managed array
+                _readbackData = voxelWorld.GetCpuVoxelData();
+                if (_readbackData == null) return;
+            }
 
             // Build collision mesh using Greedy Meshing
             _vertices.Clear();
@@ -221,8 +227,28 @@ namespace VoxelEngine
 
             try
             {
-                FillPaddedVoxelData(paddedData, paddedSizeX, paddedSizeY, paddedSizeZ,
-                    minX, minY, minZ, ws);
+                if (useCpuNative)
+                {
+                    // Parallel fill via Burst job — reads NativeArray directly (zero managed copies)
+                    var fillJob = new FillPaddedVoxelDataJob
+                    {
+                        worldData = cpuVoxelNative,
+                        paddedData = paddedData,
+                        paddedSizeX = paddedSizeX,
+                        paddedSizeY = paddedSizeY,
+                        minX = minX,
+                        minY = minY,
+                        minZ = minZ,
+                        worldSize = ws
+                    };
+                    fillJob.Schedule(paddedTotal, 256).Complete();
+                }
+                else
+                {
+                    // Serial fill from managed array (GPU readback path)
+                    FillPaddedVoxelData(paddedData, paddedSizeX, paddedSizeY, paddedSizeZ,
+                        minX, minY, minZ, ws);
+                }
 
                 int voxelCount = sizeX * sizeY * sizeZ;
                 var stream = new NativeStream(voxelCount, Allocator.TempJob);

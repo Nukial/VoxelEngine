@@ -1,6 +1,9 @@
 using UnityEngine;
 using UnityEngine.Rendering;
 using System.Collections.Generic;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
 
 namespace VoxelEngine
 {
@@ -98,12 +101,28 @@ namespace VoxelEngine
         [SerializeField] [Min(0.01f)] private float cpuReadbackInterval = 0.08f;
         [SerializeField] private bool useAsyncCpuReadback = true;
 
+        [Header("CPU Simulation (Jobs + Burst)")]
+        [Tooltip("Run simulation on CPU via Burst jobs instead of GPU compute shaders. " +
+                 "Frees the GPU for rendering when GPU is the bottleneck.")]
+        [SerializeField] private bool useCpuSimulation = true;
+
         // GPU Buffers
         private GraphicsBuffer _voxelBufferA;
         private GraphicsBuffer _voxelBufferB;
         private GraphicsBuffer _svoBuffer;           // Hierarchical occupancy (SVO mip chain)
         private GraphicsBuffer _brickDirtyFlagsBuffer; // Per-brick dirty flags
         private bool _pingPong;
+
+        // CPU-side NativeArray double buffers (used when useCpuSimulation is true)
+        private NativeArray<uint> _cpuVoxelA;
+        private NativeArray<uint> _cpuVoxelB;
+        private NativeArray<uint> _cpuBrickDirtyFlags;
+        private NativeArray<uint> _cpuSvoBuffer;
+        private bool _cpuBufferDirty;
+
+        // Async job scheduling — schedule one frame, complete next frame
+        private JobHandle _cpuSimJobHandle;
+        private bool _cpuSimInFlight;
 
         // SVO hierarchy info
         private int _svoLevelCount;
@@ -165,6 +184,24 @@ namespace VoxelEngine
         public Vector3 WorldOrigin => transform.position;
         public float WorldExtent => worldSize * voxelScale;
         public VoxelIndirectInstanceRenderer IndirectInstanceRenderer => indirectInstanceRenderer;
+        public bool UseCpuSimulation => useCpuSimulation;
+
+        /// <summary>
+        /// Provides direct read-only access to the CPU-side voxel NativeArray.
+        /// Only available when useCpuSimulation is true. Avoids GPU readback overhead.
+        /// </summary>
+        public bool TryGetCpuVoxelNativeData(out NativeArray<uint> data)
+        {
+            if (useCpuSimulation && _cpuVoxelA.IsCreated)
+            {
+                // Must complete in-flight sim before external code reads buffer A
+                CompleteCpuSimulationIfNeeded();
+                data = _cpuVoxelA;
+                return true;
+            }
+            data = default;
+            return false;
+        }
 
         // Shader property IDs (cached)
         private static readonly int PropVoxelBuffer = Shader.PropertyToID("_VoxelBuffer");
@@ -230,31 +267,83 @@ namespace VoxelEngine
         {
             if (!Application.isPlaying) return;
 
-            // Flush all queued voxel writes to the GPU in a single batched
-            // upload before simulation reads the buffer. This avoids many
-            // tiny SetData calls and prevents mid-frame GPU sync issues.
-            FlushPendingWrites();
-
-            // Run simulation
-            if (enableSimulation)
+            // Ensure CPU buffers exist when toggling CPU sim at runtime
+            if (useCpuSimulation && !_cpuVoxelA.IsCreated)
             {
-                bool simulated = RunScheduledSimulation();
-                if (simulated)
-                    _worldDirty = true;
+                InitializeCpuBuffers();
+                SyncGpuToCpuBuffers();
             }
 
-            // Only rebuild brick map + SVO when something changed
-            if (_worldDirty)
+            if (useCpuSimulation)
             {
-                UpdateBrickMapAndSVO(fullRebuild: false);
-                _worldDirty = false;
+                // =========================================================
+                // ASYNC CPU Simulation Flow
+                // Schedule jobs one frame, complete the next → main thread
+                // is free to do rendering/input while workers run.
+                // =========================================================
+
+                // Step 1: Complete previous simulation (workers likely already done → ~0ms)
+                CompleteCpuSimulationIfNeeded();
+
+                // Step 2: Flush pending writes (safe: no jobs are in flight)
+                FlushPendingWritesCpu();
+
+                // Step 3: Update brick map + SVO (tiny cost, 0.0% in profiler)
+                if (_worldDirty)
+                {
+                    UpdateBrickMapAndSVOCpu(fullRebuild: false);
+                    _worldDirty = false;
+                }
+
+                // Step 4: Upload to GPU for THIS frame's rendering
+                if (_cpuBufferDirty)
+                {
+                    UploadCpuBuffersToGpu();
+                    _cpuBufferDirty = false;
+                }
+
+                // Step 5: Schedule next sim (workers run during render + VSync)
+                if (enableSimulation)
+                {
+                    float tickInterval = 1f / Mathf.Max(1f, simulationTickRate);
+                    _simulationAccumulator += Time.deltaTime;
+
+                    if (_simulationAccumulator >= tickInterval && !_cpuSimInFlight)
+                    {
+                        _cpuSimJobHandle = ScheduleCpuSimulationJobs();
+                        _cpuSimInFlight = true;
+                        _simulationAccumulator -= tickInterval;
+                        // Prevent accumulator build-up when running slow
+                        if (_simulationAccumulator > tickInterval * 2f)
+                            _simulationAccumulator = tickInterval;
+                    }
+                }
+            }
+            else
+            {
+                // =========================================================
+                // GPU Simulation Flow (original synchronous path)
+                // =========================================================
+                FlushPendingWrites();
+
+                if (enableSimulation)
+                {
+                    bool simulated = RunScheduledSimulation();
+                    if (simulated)
+                        _worldDirty = true;
+                }
+
+                if (_worldDirty)
+                {
+                    UpdateBrickMapAndSVO(fullRebuild: false);
+                    _worldDirty = false;
+                }
+
+                UpdateCpuReadbackCache();
             }
 
             // Update rendering properties
             UpdateRenderProperties();
-
-            UpdateCpuReadbackCache();
-
             _frameCount++;
         }
 
@@ -417,8 +506,21 @@ namespace VoxelEngine
             CacheKernelIDs();
             CreateRenderingComponents();
             GenerateTerrain();
-            MarkAllBricksDirty();
-            UpdateBrickMapAndSVO(fullRebuild: true);
+
+            if (useCpuSimulation)
+            {
+                InitializeCpuBuffers();
+                SyncGpuToCpuBuffers();
+                MarkAllBricksDirtyCpu();
+                UpdateBrickMapAndSVOCpu(fullRebuild: true);
+                UploadCpuBuffersToGpu();
+            }
+            else
+            {
+                MarkAllBricksDirty();
+                UpdateBrickMapAndSVO(fullRebuild: true);
+            }
+
             UpdateRenderProperties();
         }
 
@@ -629,6 +731,13 @@ namespace VoxelEngine
         // =====================================================================
 
         private void RunSimulationStep()
+        {
+            // Note: CPU path uses async scheduling directly from Update().
+            // This method is only called for GPU path via RunScheduledSimulation.
+            RunGpuSimulationStep();
+        }
+
+        private void RunGpuSimulationStep()
         {
             if (simulationShader == null) return;
             CacheKernelIDs();
@@ -1083,6 +1192,26 @@ namespace VoxelEngine
 
         public uint[] GetCpuVoxelData(bool forceRefresh = false)
         {
+            // Fast path: CPU sim has authoritative data in NativeArray
+            if (useCpuSimulation && _cpuVoxelA.IsCreated)
+            {
+                if (_cpuReadbackCache == null || _cpuReadbackCache.Length != TotalVoxels)
+                    _cpuReadbackCache = new uint[TotalVoxels];
+
+                // Non-blocking path: if jobs are in flight, keep using last completed snapshot
+                // to avoid forcing JobHandle.Complete() from interaction/raycast calls.
+                if (_cpuSimInFlight)
+                    return _cpuReadbackReady ? _cpuReadbackCache : null;
+
+                if (forceRefresh || !_cpuReadbackReady)
+                {
+                    _cpuVoxelA.CopyTo(_cpuReadbackCache);
+                    _cpuReadbackReady = true;
+                }
+
+                return _cpuReadbackCache;
+            }
+
             if (ReadBuffer == null) return null;
 
             if (_cpuReadbackCache == null || _cpuReadbackCache.Length != TotalVoxels)
@@ -1255,6 +1384,15 @@ namespace VoxelEngine
             _kernelsCached = false;
             _worldDirty = false;
 
+            // Complete any in-flight async jobs before disposing buffers
+            if (_cpuSimInFlight)
+            {
+                _cpuSimJobHandle.Complete();
+                _cpuSimInFlight = false;
+            }
+
+            DisposeCpuBuffers();
+
             if (_rayMarchMaterial != null)
             {
                 if (Application.isPlaying)
@@ -1262,6 +1400,304 @@ namespace VoxelEngine
                 else
                     DestroyImmediate(_rayMarchMaterial);
             }
+        }
+
+        // =====================================================================
+        // CPU Simulation (Jobs + Burst)
+        // =====================================================================
+
+        private void InitializeCpuBuffers()
+        {
+            int total = TotalVoxels;
+            int brickTotal = BrickMapSize * BrickMapSize * BrickMapSize;
+
+            _cpuVoxelA = new NativeArray<uint>(total, Allocator.Persistent);
+            _cpuVoxelB = new NativeArray<uint>(total, Allocator.Persistent);
+            _cpuBrickDirtyFlags = new NativeArray<uint>(brickTotal, Allocator.Persistent);
+            _cpuSvoBuffer = new NativeArray<uint>(Mathf.Max(1, _svoTotalEntries), Allocator.Persistent);
+            _cpuBufferDirty = false;
+
+            Debug.Log("[VoxelWorld] CPU simulation buffers created (Jobs + Burst mode)");
+        }
+
+        private void DisposeCpuBuffers()
+        {
+            if (_cpuVoxelA.IsCreated) _cpuVoxelA.Dispose();
+            if (_cpuVoxelB.IsCreated) _cpuVoxelB.Dispose();
+            if (_cpuBrickDirtyFlags.IsCreated) _cpuBrickDirtyFlags.Dispose();
+            if (_cpuSvoBuffer.IsCreated) _cpuSvoBuffer.Dispose();
+        }
+
+        /// <summary>
+        /// One-time download of GPU terrain data → CPU NativeArrays after terrain generation.
+        /// </summary>
+        private void SyncGpuToCpuBuffers()
+        {
+            if (!_cpuVoxelA.IsCreated) return;
+
+            var temp = new uint[TotalVoxels];
+            _voxelBufferA.GetData(temp);
+            _cpuVoxelA.CopyFrom(temp);
+            _cpuVoxelB.CopyFrom(temp);
+            _cpuBufferDirty = false;
+        }
+
+        /// <summary>
+        /// CPU-side pending write flush: writes directly to NativeArray
+        /// (no sorting or batching needed — random access is cheap on CPU).
+        /// </summary>
+        private void FlushPendingWritesCpu()
+        {
+            int count = _pendingWrites.Count;
+            if (count == 0 || !_cpuVoxelA.IsCreated) return;
+
+            int bms = BrickMapSize;
+            for (int i = 0; i < count; i++)
+            {
+                var w = _pendingWrites[i];
+                _cpuVoxelA[w.index] = w.value;
+
+                // Mark brick dirty
+                Vector3Int vpos = VoxelData.Unflatten3D(w.index, worldSize);
+                int bx = vpos.x / brickSize;
+                int by = vpos.y / brickSize;
+                int bz = vpos.z / brickSize;
+                if (bx >= 0 && bx < bms && by >= 0 && by < bms && bz >= 0 && bz < bms)
+                {
+                    int brickIdx = VoxelData.Flatten3D(bx, by, bz, bms);
+                    _cpuBrickDirtyFlags[brickIdx] = 1u;
+                }
+            }
+
+            _pendingWrites.Clear();
+            _worldDirty = true;
+            _cpuBufferDirty = true;
+            _cpuReadbackReady = false;
+        }
+
+        /// <summary>
+        /// Complete any in-flight async CPU simulation.
+        /// Called at frame start — workers typically already finished → near-instant.
+        /// </summary>
+        private void CompleteCpuSimulationIfNeeded()
+        {
+            if (!_cpuSimInFlight) return;
+
+            _cpuSimJobHandle.Complete();
+            _cpuSimInFlight = false;
+            _simStep++;
+            _worldDirty = true;
+            _cpuBufferDirty = true;
+            _cpuReadbackReady = false;
+        }
+
+        /// <summary>
+        /// Schedule one full simulation tick as async Burst jobs — returns immediately.
+        /// Workers execute during rendering + VSync. Complete next frame via
+        /// CompleteCpuSimulationIfNeeded().
+        /// Phase 1: Clear B → Phase 2: Simulate A→B → Phase 3: HeatLight B→A
+        /// → Phase 4: LightOnly ping-pong (even passes, result stays in A).
+        /// </summary>
+        private unsafe JobHandle ScheduleCpuSimulationJobs()
+        {
+            if (!_cpuVoxelA.IsCreated || !_cpuVoxelB.IsCreated) return default;
+
+            int total = TotalVoxels;
+
+            // Phase 1: Clear write buffer (B)
+            var clearJob = new ClearBufferJob { buffer = _cpuVoxelB };
+            JobHandle clearHandle = clearJob.Schedule(total, 2048);
+
+            // Phase 2: Simulate voxels (read A → write B via CAS)
+            var simJob = new SimulateVoxelsJob
+            {
+                readBuffer = _cpuVoxelA,
+                writeBufferPtr = (int*)NativeArrayUnsafeUtility.GetUnsafeBufferPointerWithoutChecks(_cpuVoxelB),
+                dirtyFlagsPtr = (uint*)NativeArrayUnsafeUtility.GetUnsafeBufferPointerWithoutChecks(_cpuBrickDirtyFlags),
+                worldSize = worldSize,
+                brickSize = brickSize,
+                brickMapSize = BrickMapSize,
+                frameCount = _frameCount,
+                simStep = _simStep
+            };
+            JobHandle simHandle = simJob.Schedule(total, 512, clearHandle);
+
+            // Phase 3: Heat + Light propagation (read B → write A)
+            GetFireParams(out int fSpreadTemp, out int fWoodTemp, out int fLeafTemp,
+                out int fCoalTemp, out int fSnowTemp, out int fWaterTemp,
+                out int fBurnLightTemp, out int fRiseRate, out int fCoolRate,
+                out int fSinkCool, out int fBurnoutDiv);
+
+            var heatLightJob = new PropagateHeatAndLightJob
+            {
+                readBuffer = _cpuVoxelB,
+                writeBuffer = _cpuVoxelA,
+                dirtyFlags = _cpuBrickDirtyFlags,
+                worldSize = worldSize,
+                brickSize = brickSize,
+                brickMapSize = BrickMapSize,
+                frameCount = _frameCount,
+                fireSpreadNeighborTemp = fSpreadTemp,
+                woodCharTemp = fWoodTemp,
+                leafBurnTemp = fLeafTemp,
+                coalBurnoutTemp = fCoalTemp,
+                snowMeltTemp = fSnowTemp,
+                waterEvapTemp = fWaterTemp,
+                burningLightTemp = fBurnLightTemp,
+                heatRiseRate = fRiseRate,
+                coolRate = fCoolRate,
+                heatSinkExtraCool = fSinkCool,
+                coalBurnoutChanceDiv = fBurnoutDiv
+            };
+            JobHandle heatHandle = heatLightJob.Schedule(total, 1024, simHandle);
+
+            // Phase 4: Multi-pass light-only propagation (even number of passes)
+            // After Phase 3, result is in A. Even passes keep result in A.
+            int extraPasses = Mathf.Max(0, lightPropagationPasses - 1);
+            if (extraPasses % 2 != 0) extraPasses++;
+
+            JobHandle lastHandle = heatHandle;
+            for (int pass = 0; pass < extraPasses; pass++)
+            {
+                bool readFromA = (pass % 2 == 0);
+                var lightJob = new PropagateLightOnlyJob
+                {
+                    readBuffer = readFromA ? _cpuVoxelA : _cpuVoxelB,
+                    writeBuffer = readFromA ? _cpuVoxelB : _cpuVoxelA,
+                    worldSize = worldSize,
+                    burningLightTemp = fBurnLightTemp
+                };
+                lastHandle = lightJob.Schedule(total, 1024, lastHandle);
+            }
+
+            // Return handle — do NOT call Complete(). Workers run asynchronously.
+            return lastHandle;
+        }
+
+        /// <summary>
+        /// Extract resolved fire simulation parameters based on current profile.
+        /// </summary>
+        private void GetFireParams(out int spreadTemp, out int woodTemp, out int leafTemp,
+            out int coalTemp, out int snowTemp, out int waterTemp, out int burnLightTemp,
+            out int riseRate, out int decayRate, out int sinkCool, out int burnoutDiv)
+        {
+            spreadTemp = fireSpreadNeighborTemp;
+            woodTemp = woodCharTemp;
+            leafTemp = leafBurnTemp;
+            coalTemp = coalBurnoutTemp;
+            snowTemp = snowMeltTemp;
+            waterTemp = waterEvapTemp;
+            burnLightTemp = burningLightTemp;
+            riseRate = heatRiseRate;
+            decayRate = coolRate;
+            sinkCool = heatSinkExtraCool;
+            burnoutDiv = coalBurnoutChanceDiv;
+
+            if (fireProfile == FireSimulationProfile.Fast)
+            {
+                spreadTemp = 7; woodTemp = 10; leafTemp = 8; coalTemp = 13;
+                snowTemp = 3; waterTemp = 10; burnLightTemp = 8;
+                riseRate = 2; decayRate = 1; sinkCool = 0; burnoutDiv = 5;
+            }
+            else if (fireProfile == FireSimulationProfile.Realistic)
+            {
+                spreadTemp = 10; woodTemp = 13; leafTemp = 10; coalTemp = 15;
+                snowTemp = 5; waterTemp = 13; burnLightTemp = 10;
+                riseRate = 1; decayRate = 1; sinkCool = 1; burnoutDiv = 12;
+            }
+
+            spreadTemp = Mathf.Clamp(spreadTemp, 4, 15);
+            woodTemp = Mathf.Clamp(woodTemp, 6, 15);
+            leafTemp = Mathf.Clamp(leafTemp, 6, 15);
+            coalTemp = Mathf.Clamp(coalTemp, 8, 15);
+            snowTemp = Mathf.Clamp(snowTemp, 2, 8);
+            waterTemp = Mathf.Clamp(waterTemp, 8, 15);
+            burnLightTemp = Mathf.Clamp(burnLightTemp, 6, 15);
+            riseRate = Mathf.Clamp(riseRate, 1, 3);
+            decayRate = Mathf.Clamp(decayRate, 1, 3);
+            sinkCool = Mathf.Clamp(sinkCool, 0, 2);
+            burnoutDiv = Mathf.Max(2, burnoutDiv);
+        }
+
+        /// <summary>
+        /// CPU-side brick map and SVO hierarchy update (replaces GPU compute).
+        /// </summary>
+        private void UpdateBrickMapAndSVOCpu(bool fullRebuild)
+        {
+            if (!_cpuVoxelA.IsCreated || !_cpuSvoBuffer.IsCreated) return;
+
+            int brickCount = BrickMapSize * BrickMapSize * BrickMapSize;
+
+            // Update brick map (SVO level 0)
+            var brickJob = new UpdateBrickMapJob
+            {
+                voxelBuffer = _cpuVoxelA,
+                svoBuffer = _cpuSvoBuffer,
+                dirtyFlags = _cpuBrickDirtyFlags,
+                worldSize = worldSize,
+                brickSize = brickSize,
+                brickMapSize = BrickMapSize,
+                svoLevel0Offset = _svoLevelOffsets[0],
+                fullRebuild = fullRebuild
+            };
+            JobHandle brickHandle = brickJob.Schedule(brickCount, 64);
+
+            // Build SVO upper levels (level 1, 2, 3, ...)
+            JobHandle lastHandle = brickHandle;
+            for (int level = 1; level < _svoLevelCount; level++)
+            {
+                int dstTotal = _svoGridSizes[level] * _svoGridSizes[level] * _svoGridSizes[level];
+                var svoJob = new BuildSVOLevelJob
+                {
+                    svoBuffer = _cpuSvoBuffer,
+                    srcLevelOffset = _svoLevelOffsets[level - 1],
+                    dstLevelOffset = _svoLevelOffsets[level],
+                    srcGridSize = _svoGridSizes[level - 1],
+                    dstGridSize = _svoGridSizes[level]
+                };
+                lastHandle = svoJob.Schedule(dstTotal, 64, lastHandle);
+            }
+
+            lastHandle.Complete();
+            _cpuBufferDirty = true;
+        }
+
+        /// <summary>
+        /// Mark all bricks as dirty on CPU NativeArray.
+        /// </summary>
+        private void MarkAllBricksDirtyCpu()
+        {
+            if (!_cpuBrickDirtyFlags.IsCreated) return;
+            var markJob = new MarkAllDirtyJob { dirtyFlags = _cpuBrickDirtyFlags };
+            markJob.Schedule(_cpuBrickDirtyFlags.Length, 256).Complete();
+            _worldDirty = true;
+        }
+
+        /// <summary>
+        /// Upload CPU NativeArray data → GPU GraphicsBuffers for rendering.
+        /// Single SetData call per buffer — efficient DMA transfer.
+        /// Called once per frame when data has changed.
+        /// </summary>
+        private void UploadCpuBuffersToGpu()
+        {
+            if (!_cpuVoxelA.IsCreated) return;
+
+            // Upload voxel data to the non-read buffer first, then flip.
+            // This avoids writing into the buffer the GPU may still be reading,
+            // which can force a stall and inflate WaitForGPU on D3D12.
+            if (ReadBuffer != null && WriteBuffer != null)
+            {
+                WriteBuffer.SetData(_cpuVoxelA);
+                _pingPong = !_pingPong;
+            }
+            else if (ReadBuffer != null)
+            {
+                ReadBuffer.SetData(_cpuVoxelA);
+            }
+
+            // Upload SVO hierarchy (used by raymarching for accelerated skipping)
+            if (_svoBuffer != null && _cpuSvoBuffer.IsCreated)
+                _svoBuffer.SetData(_cpuSvoBuffer);
         }
 
         // =====================================================================
