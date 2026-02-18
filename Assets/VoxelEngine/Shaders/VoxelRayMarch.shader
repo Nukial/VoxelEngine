@@ -301,7 +301,8 @@ Shader "VoxelEngine/RayMarch"
                         else if (tSBExit == tFarAxis.y) normal = float3(0, -stepDir.y, 0);
                         else normal = float3(0, 0, -stepDir.z);
                         
-                        float3 jumpPos = origin + safeDir * (tSBExit + 0.001);
+                        float tJump = tSBExit + 0.001;
+                        float3 jumpPos = origin + safeDir * tJump;
                         pos = int3(floor(jumpPos));
                         
                         nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
@@ -505,7 +506,8 @@ Shader "VoxelEngine/RayMarch"
                         float3 tFA = max(tE0, tE1);
                         float tSBE = min(min(tFA.x, tFA.y), tFA.z);
                         
-                        float3 jumpPos = origin + safeDir * (tSBE + 0.001);
+                        float tJump = tSBE + 0.001;
+                        float3 jumpPos = origin + safeDir * tJump;
                         pos = int3(floor(jumpPos));
                         
                         nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
@@ -523,7 +525,8 @@ Shader "VoxelEngine/RayMarch"
                         float3 tFarAxis = max(tExit0, tExit1);
                         float tBrickExit = min(min(tFarAxis.x, tFarAxis.y), tFarAxis.z);
                         
-                        float3 jumpPos = origin + safeDir * (tBrickExit + 0.001);
+                        float tJump = tBrickExit + 0.001;
+                        float3 jumpPos = origin + safeDir * tJump;
                         pos = int3(floor(jumpPos));
                         
                         nextBound.x = stepDir.x > 0 ? float(pos.x + 1) : float(pos.x);
@@ -589,11 +592,14 @@ Shader "VoxelEngine/RayMarch"
                 float shadowFactor = 1.0;
                 #ifdef VOXEL_SHADOWS_ON
                 {
-                    float3 shadowOrigin = float3(voxelPos) + 0.5 + normal * 1.2 + L * 0.15;
-                    if (CastShadowRay(shadowOrigin, L, _MaxShadowSteps))
+                    if (_ShadowStrength > 0.001 && NdotL > 0.001)
                     {
-                        float shadowDarkness = lerp(1.0, 0.25, _ShadowStrength);
-                        shadowFactor = shadowDarkness;
+                        float3 shadowOrigin = float3(voxelPos) + 0.5 + normal * 1.2 + L * 0.15;
+                        if (CastShadowRay(shadowOrigin, L, _MaxShadowSteps))
+                        {
+                            float shadowDarkness = lerp(1.0, 0.25, _ShadowStrength);
+                            shadowFactor = shadowDarkness;
+                        }
                     }
                 }
                 #endif
@@ -958,7 +964,8 @@ Shader "VoxelEngine/RayMarch"
                         float3 tE1 = (sbMax - origin) * invDir;
                         float3 tFA = max(tE0, tE1);
                         float tSBE = min(min(tFA.x, tFA.y), tFA.z);
-                        float3 jp = origin + safeDir * (tSBE + 0.001);
+                        float tJump = tSBE + 0.001;
+                        float3 jp = origin + safeDir * tJump;
                         pos = int3(floor(jp));
                         nextBound.x = stepDir.x>0 ? float(pos.x+1) : float(pos.x);
                         nextBound.y = stepDir.y>0 ? float(pos.y+1) : float(pos.y);
@@ -971,7 +978,8 @@ Shader "VoxelEngine/RayMarch"
                         float3 bMinF=float3(bp*_BrickSize), bMaxF=bMinF+float(_BrickSize);
                         float3 te0=(bMinF-origin)*invDir, te1=(bMaxF-origin)*invDir;
                         float tBE=min(min(max(te0.x,te1.x),max(te0.y,te1.y)),max(te0.z,te1.z));
-                        float3 jp=origin+safeDir*(tBE+0.001);
+                        float tJump=tBE+0.001;
+                        float3 jp=origin+safeDir*tJump;
                         pos=int3(floor(jp));
                         nextBound.x=stepDir.x>0?float(pos.x+1):float(pos.x);
                         nextBound.y=stepDir.y>0?float(pos.y+1):float(pos.y);
