@@ -104,6 +104,9 @@ namespace VoxelEngine
         [SerializeField] private float fogDensity = 0.003f;
         [SerializeField] private Color fogColor = new Color(0.6f, 0.75f, 0.9f);
 
+        [Header("Glass Dome")]
+        [SerializeField] private Shader glassDomeShader;
+
         [Header("CPU Readback")]
         [SerializeField] [Min(0.01f)] private float cpuReadbackInterval = 0.08f;
         [SerializeField] private bool useAsyncCpuReadback = true;
@@ -118,6 +121,7 @@ namespace VoxelEngine
         private VoxelRenderer _renderer;
         private VoxelAdaptiveQuality _quality;
         private VoxelCpuReadback _cpuReadback;
+        private VoxelDualCamera _dualCamera;
 
         private uint _frameCount;
 
@@ -202,9 +206,24 @@ namespace VoxelEngine
         {
             if (!Application.isPlaying) return;
 
-            // Draw the voxel volume manually — bypasses Unity's frustum culling
-            // so the map is never culled when the camera enters the bounding box.
-            _renderer?.DrawManual(transform.localToWorldMatrix);
+            if (_dualCamera == null)
+                _dualCamera = FindFirstObjectByType<VoxelDualCamera>();
+
+            if (_dualCamera != null && _dualCamera.CameraMode == VoxelCameraMode.GodView)
+            {
+                // God view: camera is OUTSIDE the volume.
+                // Standard MeshRenderer works — frustum culling is valid and
+                // saves GPU work by not rendering back-facing geometry.
+                _renderer?.EnableMeshRenderer(true);
+            }
+            else
+            {
+                // Inside view (or no dual camera): camera is INSIDE the bounding box.
+                // Must bypass Unity's frustum culling via Graphics.DrawMesh,
+                // otherwise the volume gets culled when the camera enters it.
+                _renderer?.EnableMeshRenderer(false);
+                _renderer?.DrawManual(transform.localToWorldMatrix);
+            }
         }
 
         // =================================================================

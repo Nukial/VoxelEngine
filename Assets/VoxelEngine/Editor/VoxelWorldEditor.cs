@@ -15,8 +15,10 @@ namespace VoxelEngine.Editor
         private SerializedProperty _simulationShader;
         private SerializedProperty _brickMapShader;
         private SerializedProperty _rayMarchShader;
+        private SerializedProperty _glassDomeShader;
 
         private bool _showWorldInfo = true;
+        private bool _showGlassDomeInfo = true;
 
         private void OnEnable()
         {
@@ -28,6 +30,7 @@ namespace VoxelEngine.Editor
             _simulationShader = serializedObject.FindProperty("simulationShader");
             _brickMapShader = serializedObject.FindProperty("brickMapShader");
             _rayMarchShader = serializedObject.FindProperty("rayMarchShader");
+            _glassDomeShader = serializedObject.FindProperty("glassDomeShader");
         }
 
         public override void OnInspectorGUI()
@@ -57,6 +60,13 @@ namespace VoxelEngine.Editor
                     MessageType.Warning);
             }
 
+            if (_glassDomeShader != null && _glassDomeShader.objectReferenceValue == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "Glass Dome shader not assigned. Use 'Run Editor Setup' to auto-assign, or assign manually.",
+                    MessageType.Info);
+            }
+
             EditorGUILayout.Space(5);
 
             // World info
@@ -75,6 +85,61 @@ namespace VoxelEngine.Editor
                 long memBytes = totalVoxels * 4 * 2; // Two ping-pong buffers
                 memBytes += bms * bms * bms * 4; // Brick map
                 EditorGUILayout.LabelField("Est. VRAM", $"{memBytes / 1024f / 1024f:F1} MB");
+
+                EditorGUI.indentLevel--;
+                EditorGUILayout.Space(5);
+            }
+
+            // Glass Dome & Camera info (play mode)
+            _showGlassDomeInfo = EditorGUILayout.Foldout(_showGlassDomeInfo, "Glass Dome & Camera", true);
+            if (_showGlassDomeInfo)
+            {
+                EditorGUI.indentLevel++;
+
+                // Show glass dome status
+                var glassDome = world.GetComponent<VoxelGlassDome>();
+                if (glassDome != null)
+                {
+                    EditorGUILayout.LabelField("Glass Dome", "Attached");
+                }
+                else
+                {
+                    EditorGUILayout.LabelField("Glass Dome", "Not attached");
+                    if (GUILayout.Button("Add Glass Dome Component"))
+                    {
+                        Undo.AddComponent<VoxelGlassDome>(world.gameObject);
+                    }
+                }
+
+                // Show camera mode status
+                if (Application.isPlaying)
+                {
+                    var dualCam = Object.FindFirstObjectByType<VoxelDualCamera>();
+                    if (dualCam != null)
+                    {
+                        EditorGUILayout.LabelField("Camera Mode", dualCam.CameraMode.ToString());
+                        EditorGUILayout.HelpBox("Press Tab to toggle between God View and Inside View.", MessageType.Info);
+
+                        EditorGUILayout.BeginHorizontal();
+                        if (GUILayout.Button("Switch to God View"))
+                            dualCam.SetCameraMode(VoxelCameraMode.GodView);
+                        if (GUILayout.Button("Switch to Inside View"))
+                            dualCam.SetCameraMode(VoxelCameraMode.InsideView);
+                        EditorGUILayout.EndHorizontal();
+                    }
+                    else
+                    {
+                        EditorGUILayout.LabelField("Dual Camera", "Not found in scene");
+                    }
+                }
+                else
+                {
+                    var dualCam = Object.FindFirstObjectByType<VoxelDualCamera>();
+                    if (dualCam != null)
+                        EditorGUILayout.LabelField("Dual Camera", "Ready (Tab to toggle in Play Mode)");
+                    else
+                        EditorGUILayout.LabelField("Dual Camera", "Not in scene — run Editor Setup");
+                }
 
                 EditorGUI.indentLevel--;
                 EditorGUILayout.Space(5);

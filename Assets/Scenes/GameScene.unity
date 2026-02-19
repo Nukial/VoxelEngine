@@ -130,9 +130,9 @@ GameObject:
   - component: {fileID: 12617762}
   - component: {fileID: 12617761}
   - component: {fileID: 12617760}
-  - component: {fileID: 12617764}
   - component: {fileID: 12617763}
   - component: {fileID: 12617765}
+  - component: {fileID: 12617766}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -179,7 +179,7 @@ Camera:
     y: 0
     width: 1
     height: 1
-  near clip plane: 0.1
+  near clip plane: 0.3
   far clip plane: 500
   field of view: 60
   orthographic: 0
@@ -207,8 +207,8 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 12617759}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.25666794, y: 0, z: 0, w: 0.9664997}
-  m_LocalPosition: {x: 16, y: 22.4, z: -6.4}
+  m_LocalRotation: {x: 0.21169968, y: 0, z: 0, w: 0.9773348}
+  m_LocalPosition: {x: 16, y: 25.6, z: -19.2}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -236,24 +236,6 @@ MonoBehaviour:
   continuousInterval: 0.05
   showCrosshair: 1
   showTargetHighlight: 1
---- !u!114 &12617764
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 12617759}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: f89898ca03ad263469577291d0065c07, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelCamera
-  moveSpeed: 10
-  sprintMultiplier: 3
-  scrollSpeedMultiplier: 1.2
-  smoothing: 0.1
-  mouseSensitivity: 2
-  maxPitch: 89
 --- !u!114 &12617765
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -298,6 +280,36 @@ MonoBehaviour:
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
   m_Version: 2
+--- !u!114 &12617766
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 12617759}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 73369441c9ef3484cb25e7a31ebf64fe, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelDualCamera
+  cameraMode: 0
+  toggleModeKey: 9
+  orbitDistance: 57.6
+  orbitMinDistance: 19.2
+  orbitMaxDistance: 160
+  orbitSensitivity: 2
+  orbitZoomSpeed: 10
+  orbitSmoothing: 0.08
+  orbitMinPitch: -85
+  orbitMaxPitch: 85
+  flySpeed: 10
+  flySprintMultiplier: 3
+  flySensitivity: 2
+  flySmoothing: 0.1
+  flyScrollSpeedMult: 1.2
+  flyMaxPitch: 89
+  voxelWorld: {fileID: 1167274014}
+  boundaryMargin: 2
 --- !u!1 &182396261
 GameObject:
   m_ObjectHideFlags: 0
@@ -356,6 +368,7 @@ GameObject:
   - component: {fileID: 1167274015}
   - component: {fileID: 1167274014}
   - component: {fileID: 1167274013}
+  - component: {fileID: 1167274016}
   m_Layer: 0
   m_Name: VoxelWorld
   m_TagString: Untagged
@@ -451,7 +464,7 @@ MonoBehaviour:
   fastLightingDistanceRatio: 0.52
   shadowRayDistanceRatio: 0.45
   syncWithUnityDirectionalLight: 1
-  directionalLightOverride: {fileID: 0}
+  directionalLightOverride: {fileID: 1727375046}
   syncAmbientFromRenderSettings: 0
   ambientColor: {r: 0.15, g: 0.18, b: 0.25, a: 1}
   sunColor: {r: 1, g: 0.95, b: 0.85, a: 1}
@@ -459,6 +472,7 @@ MonoBehaviour:
   sunDirection: {x: 0.5, y: 0.8, z: 0.3}
   fogDensity: 0.003
   fogColor: {r: 0.6, g: 0.75, b: 0.9, a: 1}
+  glassDomeShader: {fileID: 4800000, guid: 79d4e3806154816459d6c37b5586e110, type: 3}
   cpuReadbackInterval: 0.08
   useAsyncCpuReadback: 1
 --- !u!4 &1167274015
@@ -478,6 +492,35 @@ Transform:
   - {fileID: 1842111929}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1167274016
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1167274012}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ad23f956644707947ac162a2b1cded8a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelGlassDome
+  voxelWorld: {fileID: 1167274014}
+  dualCamera: {fileID: 12617766}
+  glassDomeShader: {fileID: 4800000, guid: 79d4e3806154816459d6c37b5586e110, type: 3}
+  glassColor: {r: 0.7, g: 0.85, b: 0.95, a: 0.12}
+  fresnelPower: 3
+  fresnelStrength: 0.6
+  reflectionStrength: 0.25
+  smoothness: 0.95
+  edgeColor: {r: 0.4, g: 0.7, b: 1, a: 1}
+  edgeWidth: 0.03
+  edgeGlowIntensity: 1.2
+  gridColor: {r: 0.5, g: 0.8, b: 1, a: 0.15}
+  gridScale: 4
+  gridThickness: 0.01
+  margin: 0.5
+  visibleInGodView: 1
+  visibleInInsideView: 1
 --- !u!1 &1727375045
 GameObject:
   m_ObjectHideFlags: 0
@@ -652,7 +695,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: VoxelEngine.Runtime::VoxelEngine.VoxelCollision
   voxelWorld: {fileID: 1167274014}
   trackTarget: {fileID: 12617762}
-  enableCollisionMeshing: 1
+  enableCollisionMeshing: 0
   collisionRadius: 12
   updateInterval: 0.4
   movementThreshold: 2

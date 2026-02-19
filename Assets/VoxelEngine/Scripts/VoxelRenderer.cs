@@ -215,6 +215,17 @@ namespace VoxelEngine
         }
 
         /// <summary>
+        /// Enable or disable the MeshRenderer path.
+        /// When enabled (God view), Unity's frustum culling works normally.
+        /// When disabled (Inside view), use DrawManual() instead.
+        /// </summary>
+        public void EnableMeshRenderer(bool enabled)
+        {
+            if (_meshRenderer != null && _meshRenderer.enabled != enabled)
+                _meshRenderer.enabled = enabled;
+        }
+
+        /// <summary>
         /// Backup draw call via Graphics.DrawMesh — completely bypasses Unity's
         /// frustum culling. Called every frame from LateUpdate as a safety net
         /// in case the MeshRenderer path is culled.
@@ -222,11 +233,6 @@ namespace VoxelEngine
         public void DrawManual(Matrix4x4 localToWorld)
         {
             if (_boxMesh == null || _rayMarchMaterial == null) return;
-
-            // If MeshRenderer is still active, disable it so we don't double-render.
-            // Graphics.DrawMesh is the more reliable path.
-            if (_meshRenderer != null && _meshRenderer.enabled)
-                _meshRenderer.enabled = false;
 
             Graphics.DrawMesh(
                 _boxMesh,

@@ -66,6 +66,7 @@ namespace VoxelEngine.Editor
             var simulation = FindAssetByNames<ComputeShader>("VoxelSimulation", "Simulation");
             var brickMap = FindAssetByNames<ComputeShader>("BrickMapUpdate", "VoxelBrickMapUpdate");
             var rayMarchShader = Shader.Find("VoxelEngine/RayMarch") ?? FindAssetByNames<Shader>("RayMarch");
+            var glassDomeShader = Shader.Find("VoxelEngine/GlassDome") ?? FindAssetByNames<Shader>("GlassDome");
 
             if (terrainGen == null || simulation == null || brickMap == null)
             {
@@ -78,6 +79,9 @@ namespace VoxelEngine.Editor
                 Debug.LogError("[VoxelEngine] Could not find VoxelEngine/RayMarch shader!");
                 return;
             }
+
+            if (glassDomeShader == null)
+                Debug.LogWarning("[VoxelEngine] GlassDome shader not found. Glass dome will not be created.");
 
             VoxelWorld world = Object.FindFirstObjectByType<VoxelWorld>();
             if (world != null)
@@ -96,7 +100,8 @@ namespace VoxelEngine.Editor
             var worldObject = world.gameObject;
             var indirectRenderer = EnsureComponent<VoxelIndirectInstanceRenderer>(worldObject);
 
-            ApplyVoxelWorldDefaults(world, indirectRenderer, terrainGen, simulation, brickMap, rayMarchShader, worldSize);
+            ApplyVoxelWorldDefaults(world, indirectRenderer, terrainGen, simulation, brickMap,
+                rayMarchShader, glassDomeShader, worldSize);
 
             var cam = Camera.main;
             if (cam == null)
@@ -109,12 +114,25 @@ namespace VoxelEngine.Editor
             }
 
             float extent = worldSize * DefaultVoxelScale;
-            cam.transform.position = new Vector3(extent * 0.5f, extent * 0.7f, -extent * 0.2f);
+            // Position camera outside for default God View mode
+            cam.transform.position = new Vector3(extent * 0.5f, extent * 0.8f, -extent * 0.6f);
             cam.transform.LookAt(new Vector3(extent * 0.5f, extent * 0.3f, extent * 0.5f));
-            cam.nearClipPlane = 0.05f;
+            cam.nearClipPlane = 0.3f;
             cam.farClipPlane = 500f;
 
-            EnsureComponent<VoxelCamera>(cam.gameObject);
+            // Use VoxelDualCamera instead of VoxelCamera for glass dome gameplay
+            var dualCamera = EnsureComponent<VoxelDualCamera>(cam.gameObject);
+            var dualCamSO = new SerializedObject(dualCamera);
+            SetObject(dualCamSO, "voxelWorld", world);
+            SetFloat(dualCamSO, "orbitDistance", extent * 1.8f);
+            SetFloat(dualCamSO, "orbitMinDistance", extent * 0.6f);
+            SetFloat(dualCamSO, "orbitMaxDistance", extent * 5f);
+            dualCamSO.ApplyModifiedPropertiesWithoutUndo();
+
+            // Remove legacy VoxelCamera if present (replaced by VoxelDualCamera)
+            var legacyVoxelCam = cam.gameObject.GetComponent<VoxelCamera>();
+            if (legacyVoxelCam != null)
+                Undo.DestroyObjectImmediate(legacyVoxelCam);
 
             var interaction = EnsureComponent<VoxelInteraction>(cam.gameObject);
 
@@ -140,6 +158,17 @@ namespace VoxelEngine.Editor
             SetInt(collisionSO, "collisionRadius", 12);
             collisionSO.ApplyModifiedPropertiesWithoutUndo();
 
+            // Glass Dome
+            if (glassDomeShader != null)
+            {
+                var glassDome = EnsureComponent<VoxelGlassDome>(worldObject);
+                var domeSO = new SerializedObject(glassDome);
+                SetObject(domeSO, "voxelWorld", world);
+                SetObject(domeSO, "dualCamera", dualCamera);
+                SetObject(domeSO, "glassDomeShader", glassDomeShader);
+                domeSO.ApplyModifiedPropertiesWithoutUndo();
+            }
+
             Light mainDirectional = EnsureDirectionalLight();
             BindDirectionalLightOverride(world, mainDirectional);
 
@@ -148,7 +177,7 @@ namespace VoxelEngine.Editor
             Undo.CollapseUndoOperations(undoGroup);
 
             Debug.Log("[VoxelEngine] Scene setup complete! Press Play to see the voxel world.");
-            Debug.Log("[VoxelEngine] Controls: WASD=Move, Mouse=Look, LMB=Dig, RMB=Place, 1-9=Material");
+            Debug.Log("[VoxelEngine] Controls: WASD=Move, Mouse=Look, LMB=Dig, RMB=Place, 1-9=Material, Tab=Toggle Camera Mode");
         }
 
         private static void ApplyVoxelWorldDefaults(
@@ -158,6 +187,7 @@ namespace VoxelEngine.Editor
             ComputeShader simulation,
             ComputeShader brickMap,
             Shader rayMarchShader,
+            Shader glassDomeShader,
             int worldSize)
         {
             var worldSO = new SerializedObject(world);
@@ -167,6 +197,9 @@ namespace VoxelEngine.Editor
             SetObject(worldSO, "brickMapShader", brickMap);
             SetObject(worldSO, "rayMarchShader", rayMarchShader);
             SetObject(worldSO, "indirectInstanceRenderer", indirectRenderer);
+
+            if (glassDomeShader != null)
+                SetObject(worldSO, "glassDomeShader", glassDomeShader);
 
             SetInt(worldSO, "worldSize", worldSize);
             SetInt(worldSO, "brickSize", 8);
