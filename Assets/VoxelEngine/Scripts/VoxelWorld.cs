@@ -198,6 +198,15 @@ namespace VoxelEngine
             _frameCount++;
         }
 
+        private void LateUpdate()
+        {
+            if (!Application.isPlaying) return;
+
+            // Draw the voxel volume manually — bypasses Unity's frustum culling
+            // so the map is never culled when the camera enters the bounding box.
+            _renderer?.DrawManual(transform.localToWorldMatrix);
+        }
+
         // =================================================================
         // Initialization / Cleanup
         // =================================================================

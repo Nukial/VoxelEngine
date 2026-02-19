@@ -31,8 +31,10 @@ namespace VoxelEngine
         private static readonly int PropShadowRayMaxDist = Shader.PropertyToID("_ShadowRayMaxDist");
 
         private Material _rayMarchMaterial;
+        private Mesh _boxMesh;
         private MeshFilter _meshFilter;
         private MeshRenderer _meshRenderer;
+        private int _layer;
 
         // Lighting state
         private Light _cachedDirectionalLight;
@@ -75,6 +77,10 @@ namespace VoxelEngine
             else
                 _rayMarchMaterial.DisableKeyword("VOXEL_SHADOWS_ON");
 
+            _boxMesh = CreateBoxMesh();
+            _layer = go.layer;
+
+            // Use MeshFilter + MeshRenderer as the primary rendering path
             _meshFilter = go.GetComponent<MeshFilter>();
             if (_meshFilter == null)
                 _meshFilter = go.AddComponent<MeshFilter>();
@@ -83,10 +89,11 @@ namespace VoxelEngine
             if (_meshRenderer == null)
                 _meshRenderer = go.AddComponent<MeshRenderer>();
 
-            _meshFilter.sharedMesh = CreateBoxMesh();
+            _meshFilter.sharedMesh = _boxMesh;
             _meshRenderer.sharedMaterial = _rayMarchMaterial;
             _meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
             _meshRenderer.receiveShadows = false;
+            _meshRenderer.allowOcclusionWhenDynamic = false;
 
             go.transform.localScale = new Vector3(worldExtent, worldExtent, worldExtent);
         }
@@ -207,6 +214,35 @@ namespace VoxelEngine
                 ambientColor = RenderSettings.ambientLight;
         }
 
+        /// <summary>
+        /// Backup draw call via Graphics.DrawMesh — completely bypasses Unity's
+        /// frustum culling. Called every frame from LateUpdate as a safety net
+        /// in case the MeshRenderer path is culled.
+        /// </summary>
+        public void DrawManual(Matrix4x4 localToWorld)
+        {
+            if (_boxMesh == null || _rayMarchMaterial == null) return;
+
+            // If MeshRenderer is still active, disable it so we don't double-render.
+            // Graphics.DrawMesh is the more reliable path.
+            if (_meshRenderer != null && _meshRenderer.enabled)
+                _meshRenderer.enabled = false;
+
+            Graphics.DrawMesh(
+                _boxMesh,
+                localToWorld,
+                _rayMarchMaterial,
+                _layer,
+                null,   // camera — null = all cameras
+                0,      // submesh index
+                null,   // MaterialPropertyBlock
+                ShadowCastingMode.Off,
+                false,  // receive shadows
+                null,   // probe anchor
+                LightProbeUsage.Off
+            );
+        }
+
         public void Cleanup()
         {
             _smoothedShadowParamsInit = false;
@@ -218,6 +254,9 @@ namespace VoxelEngine
                     Object.DestroyImmediate(_rayMarchMaterial);
             }
             _rayMarchMaterial = null;
+            _boxMesh = null;
+            _meshFilter = null;
+            _meshRenderer = null;
         }
 
         // ----- helpers -----
@@ -251,7 +290,9 @@ namespace VoxelEngine
 
             mesh.vertices = verts;
             mesh.triangles = tris;
-            mesh.RecalculateBounds();
+            // Use massive bounds so Graphics.DrawMesh never frustum-culls
+            // this mesh — especially when the camera is inside the volume.
+            mesh.bounds = new Bounds(new Vector3(0.5f, 0.5f, 0.5f), Vector3.one * 100000f);
             return mesh;
         }
     }

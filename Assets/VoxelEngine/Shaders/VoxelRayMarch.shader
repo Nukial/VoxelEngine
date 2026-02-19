@@ -34,7 +34,7 @@ Shader "VoxelEngine/RayMarch"
             Name "VoxelRayMarch"
             Tags { "LightMode" = "UniversalForward" }
             
-            Cull Front
+            Cull Off
             ZWrite On
             ZTest LEqual
             
@@ -99,6 +99,15 @@ Shader "VoxelEngine/RayMarch"
                 float4 color : SV_Target;
                 float depth : SV_Depth;
             };
+            
+            // Check whether the camera is inside the voxel volume AABB.
+            // Margin must be >= the box mesh margin (0.12 in object space = 0.12 * _WorldSize voxels)
+            // so we switch to "render all faces" mode before the camera reaches the mesh surface.
+            bool IsCameraInsideVolume(float3 camVoxelPos)
+            {
+                float margin = 0.15 * _WorldSize;
+                return all(camVoxelPos > -margin) && all(camVoxelPos < _WorldSize + margin);
+            }
             
             struct RayHit
             {
@@ -703,13 +712,20 @@ Shader "VoxelEngine/RayMarch"
             
             // --- Fragment Shader ---
             
-            FragOutput frag(Varyings input)
+            FragOutput frag(Varyings input, bool isFrontFace : SV_IsFrontFace)
             {
                 FragOutput output;
                 
                 // Ray setup in world space
                 float3 camPos = GetCameraPositionWS();
                 float3 rayDir = normalize(input.positionWS - camPos);
+                
+                // When camera is OUTSIDE the volume, discard front-face fragments
+                // to avoid double ray marching (back face handles it).
+                // When camera is INSIDE, render ALL faces so nothing is culled.
+                float3 camVoxelPos = WorldToVoxel(camPos);
+                if (!IsCameraInsideVolume(camVoxelPos) && isFrontFace)
+                    discard;
                 
                 // Transform to voxel space
                 float3 voxelOrigin = WorldToVoxel(camPos);
@@ -824,7 +840,7 @@ Shader "VoxelEngine/RayMarch"
             Name "DepthOnly"
             Tags { "LightMode" = "DepthOnly" }
             
-            Cull Front
+            Cull Off
             ZWrite On
             ColorMask 0
             
@@ -1017,11 +1033,24 @@ Shader "VoxelEngine/RayMarch"
                 return result;
             }
             
-            float4 fragDepth(Varyings input) : SV_Target
+            // Check whether the camera is inside the voxel volume AABB.
+            // Must match the margin in the main pass.
+            bool IsCameraInsideVolume_Depth(float3 camVoxelPos)
+            {
+                float margin = 0.15 * _WorldSize;
+                return all(camVoxelPos > -margin) && all(camVoxelPos < _WorldSize + margin);
+            }
+            
+            float4 fragDepth(Varyings input, bool isFrontFace : SV_IsFrontFace) : SV_Target
             {
                 float3 camPos = GetCameraPositionWS();
-                float3 rayDir = normalize(input.positionWS - camPos);
                 float3 vo = WorldToVoxel(camPos);
+                
+                // Same front-face discard optimization as main pass
+                if (!IsCameraInsideVolume_Depth(vo) && isFrontFace)
+                    discard;
+                
+                float3 rayDir = normalize(input.positionWS - camPos);
                 
                 RayHit hit = RayMarchDepth(vo, rayDir, _MaxSteps);
                 if (!hit.hit) discard;
