@@ -17,6 +17,15 @@ Shader "VoxelEngine/RayMarch"
         _ShadowStrength ("Shadow Strength", Range(0, 1)) = 1.0
         _FastLightingMaxDist ("Fast Lighting Max Distance", Float) = 40
         _ShadowRayMaxDist ("Shadow Ray Max Distance", Float) = 32
+
+        [Header(Heat Radiation)]
+        _HeatHazeStrength ("Heat Haze Strength", Range(0.0, 0.03)) = 0.007
+        _HeatHazeScale ("Heat Haze Noise Scale", Float) = 0.25
+        _HeatHazeSpeed ("Heat Haze Speed", Float) = 1.2
+        _HeatHazeStartTemp ("Heat Haze Start Temp", Range(0, 15)) = 6
+        _HeatHazeSampleStep ("Heat Haze Sample Step", Float) = 1.6
+        _HeatRadiationStartTemp ("Heat Radiation Start Temp", Range(0, 15)) = 5
+        _HeatRadiationIntensity ("Heat Radiation Intensity", Range(0, 4)) = 1.8
         
     }
     
@@ -80,6 +89,15 @@ Shader "VoxelEngine/RayMarch"
             
             // Shadow blending
             float _ShadowStrength;
+
+            // Heat haze + blackbody radiation
+            float _HeatHazeStrength;
+            float _HeatHazeScale;
+            float _HeatHazeSpeed;
+            float _HeatHazeStartTemp;
+            float _HeatHazeSampleStep;
+            float _HeatRadiationStartTemp;
+            float _HeatRadiationIntensity;
             
             // --- Structures ---
             
@@ -565,6 +583,63 @@ Shader "VoxelEngine/RayMarch"
                 
                 return false;
             }
+
+            float3 BlackbodyFromHeat(float heatNorm)
+            {
+                heatNorm = saturate(heatNorm);
+                float3 c0 = float3(0.35, 0.03, 0.00);
+                float3 c1 = float3(0.95, 0.16, 0.02);
+                float3 c2 = float3(1.30, 0.55, 0.08);
+                float3 c3 = float3(1.95, 1.35, 0.65);
+
+                float3 mid = (heatNorm < 0.5)
+                    ? lerp(c0, c1, heatNorm * 2.0)
+                    : lerp(c1, c2, (heatNorm - 0.5) * 2.0);
+
+                return lerp(mid, c3, smoothstep(0.72, 1.0, heatNorm));
+            }
+
+            float3 ApplyHeatDistortion(float3 origin, float3 dir)
+            {
+                if (_HeatHazeStrength <= 0.0001)
+                    return dir;
+
+                float hazeAccum = 0.0;
+                float maxTempRange = max(15.0 - _HeatHazeStartTemp, 0.001);
+
+                [unroll]
+                for (int i = 1; i <= 3; i++)
+                {
+                    float3 samplePos = origin + dir * (_HeatHazeSampleStep * i);
+                    int3 sampleVoxel = int3(floor(samplePos));
+                    if (!IsInBounds(sampleVoxel, _WorldSize))
+                        continue;
+
+                    uint sampleData = ReadVoxel(sampleVoxel);
+                    uint sampleMat = GetMaterialId(sampleData);
+                    if (sampleMat == MAT_AIR)
+                        continue;
+
+                    float sampleTemp = (float)GetTemperature(sampleData);
+                    hazeAccum += saturate((sampleTemp - _HeatHazeStartTemp) / maxTempRange);
+                }
+
+                float haze = hazeAccum / 3.0;
+                if (haze <= 0.0001)
+                    return dir;
+
+                float3 upRef = abs(dir.y) > 0.92 ? float3(1, 0, 0) : float3(0, 1, 0);
+                float3 right = normalize(cross(upRef, dir));
+                float3 up = normalize(cross(dir, right));
+
+                float t = _Time.y * _HeatHazeSpeed;
+                float3 np = (origin + dir * (_HeatHazeSampleStep * 1.5)) * _HeatHazeScale;
+                float n1 = sin(dot(np, float3(12.9898, 78.233, 37.719)) + t * 1.17);
+                float n2 = cos(dot(np.zxy, float3(39.346, 11.135, 83.155)) + t * 1.41);
+
+                float distortion = _HeatHazeStrength * haze;
+                return normalize(dir + (right * n1 + up * n2) * distortion);
+            }
             
             // --- Shade a single voxel surface ---
             
@@ -687,11 +762,13 @@ Shader "VoxelEngine/RayMarch"
                 
                 // --- Heat glow: hot materials visually glow ---
                 uint temperature = GetTemperature(voxelData);
-                if (temperature > 4)
+                if ((float)temperature > _HeatRadiationStartTemp)
                 {
-                    float heatFactor = float(temperature - 4) / 11.0; // 0 to 1
-                    float3 heatColor = lerp(float3(0.6, 0.1, 0.0), float3(1.5, 0.8, 0.2), heatFactor);
-                    finalColor += heatColor * heatFactor * 1.5;
+                    float maxTempRange = max(15.0 - _HeatRadiationStartTemp, 0.001);
+                    float heatNorm = saturate(((float)temperature - _HeatRadiationStartTemp) / maxTempRange);
+                    float pulse = 0.88 + 0.12 * sin(_Time.y * 2.2 + variation * 5.7);
+                    float3 heatColor = BlackbodyFromHeat(heatNorm);
+                    finalColor += heatColor * heatNorm * _HeatRadiationIntensity * pulse;
                 }
                 
                 // --- Emission for lava ---
@@ -731,7 +808,7 @@ Shader "VoxelEngine/RayMarch"
                 
                 // Transform to voxel space
                 float3 voxelOrigin = WorldToVoxel(camPos);
-                float3 voxelDir = rayDir;
+                float3 voxelDir = ApplyHeatDistortion(voxelOrigin, rayDir);
                 
                 // Ray march with transparency support
                 TransparentLayer transLayers[MAX_TRANSPARENT_LAYERS];
