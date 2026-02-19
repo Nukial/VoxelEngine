@@ -659,8 +659,8 @@ Shader "VoxelEngine/RayMarch"
                 // Spatially smooth light by averaging with 6 neighbors to reduce
                 // discrete banding and per-frame flicker from propagation convergence.
                 uint centerLight = GetLightLevel(voxelData);
-                float smoothedLight = float(centerLight) * 3.0;
-                float lightWeight = 3.0;
+                float smoothedLight = float(centerLight) * 6.0;
+                float lightWeight = 6.0;
                 {
                     int3 nOffsets[6] = {
                         int3(1,0,0), int3(-1,0,0),
@@ -671,16 +671,18 @@ Shader "VoxelEngine/RayMarch"
                     for (int li = 0; li < 6; li++)
                     {
                         int3 nPos = voxelPos + nOffsets[li];
-                        smoothedLight += float(GetLightLevel(ReadVoxel(nPos)));
-                        lightWeight += 1.0;
+                        smoothedLight += float(GetLightLevel(ReadVoxel(nPos))) * 0.8;
+                        lightWeight += 0.8;
                     }
                 }
                 float lightFactor = smoothedLight / (lightWeight * 15.0);
+                lightFactor = pow(saturate(lightFactor), 0.72);
                 if (lightFactor > 0.001)
                 {
                     // Warm light tint from nearby emissive sources
-                    float3 voxelLightColor = float3(1.0, 0.7, 0.3) * lightFactor * 0.8;
-                    finalColor += baseColor * voxelLightColor;
+                    float3 voxelLightColor = float3(1.0, 0.72, 0.35) * lightFactor * 1.1;
+                    finalColor += baseColor * voxelLightColor * 0.75;
+                    finalColor += voxelLightColor * 0.35;
                 }
                 
                 // --- Heat glow: hot materials visually glow ---
@@ -790,8 +792,9 @@ Shader "VoxelEngine/RayMarch"
                     uint tLight = GetLightLevel(tVoxelData);
                     if (tLight > 0)
                     {
-                        float tlf = float(tLight) / 15.0;
-                        tLit += tColor * float3(1.0, 0.7, 0.3) * tlf * 0.5;
+                        float tlf = pow(saturate(float(tLight) / 15.0), 0.75);
+                        tLit += tColor * float3(1.0, 0.72, 0.35) * tlf * 0.75;
+                        tLit += float3(1.0, 0.72, 0.35) * tlf * 0.15;
                     }
                     
                     // Water refraction-like tint

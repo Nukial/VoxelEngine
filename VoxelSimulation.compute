@@ -21,6 +21,7 @@ uint _SimStep;
 // Fire / heat tuning params (set from VoxelWorld)
 int _FireSpreadNeighborTemp;
 int _WoodCharTemp;
+int _GrassBurnTemp;
 int _LeafBurnTemp;
 int _CoalBurnoutTemp;
 int _SnowMeltTemp;
@@ -371,6 +372,7 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
 
     uint fireSpreadNeighborTemp = (uint)max(0, _FireSpreadNeighborTemp);
     uint woodCharTemp = (uint)max(0, _WoodCharTemp);
+    uint grassBurnTemp = (uint)max(0, _GrassBurnTemp);
     uint leafBurnTemp = (uint)max(0, _LeafBurnTemp);
     uint coalBurnoutTemp = (uint)max(0, _CoalBurnoutTemp);
     uint snowMeltTemp = (uint)max(0, _SnowMeltTemp);
@@ -429,7 +431,7 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
         uint incomingHeat = (maxNeighborTemp > 1u) ? (maxNeighborTemp - 1u) : 0u;
 
         // Flammable materials ignite more easily when near hot neighbors.
-        if ((mat == MAT_WOOD || mat == MAT_LEAF || mat == MAT_COAL) && maxNeighborTemp >= fireSpreadNeighborTemp)
+        if ((mat == MAT_WOOD || mat == MAT_GRASS || mat == MAT_LEAF || mat == MAT_COAL) && maxNeighborTemp >= fireSpreadNeighborTemp)
             incomingHeat = max(incomingHeat, maxNeighborTemp - 1u);
 
         if (incomingHeat > currentTemp)
@@ -456,6 +458,15 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
         uint coalVoxel = PackVoxel(MAT_COAL, 0, 0);
         coalVoxel = SetTempAndLight(coalVoxel, max(newTemp, 9u), max(newTemp > 4u ? newTemp - 4u : 0u, 3u));
         _WriteBuffer[Idx(pos)] = coalVoxel;
+        return;
+    }
+
+    if (mat == MAT_GRASS && newTemp >= grassBurnTemp)
+    {
+        // Burnt grass chars into dirt and keeps residual heat/light for nearby spread.
+        uint dirtVoxel = PackVoxel(MAT_DIRT, 0, 0);
+        dirtVoxel = SetTempAndLight(dirtVoxel, max(newTemp > 2u ? newTemp - 2u : 0u, 1u), max(newTemp > 4u ? newTemp - 4u : 0u, 0u));
+        _WriteBuffer[Idx(pos)] = dirtVoxel;
         return;
     }
     
@@ -508,12 +519,12 @@ void PropagateHeatAndLight(uint3 id : SV_DispatchThreadID)
     // Hot coal glows
     else if (mat == MAT_COAL && newTemp > 4u)
     {
-        newLight = min(newTemp - 2u, 10u);
+        newLight = min(newTemp - 1u, 12u);
     }
-    else if ((mat == MAT_WOOD || mat == MAT_LEAF) && newTemp >= burningLightTemp)
+    else if ((mat == MAT_WOOD || mat == MAT_GRASS || mat == MAT_LEAF) && newTemp >= burningLightTemp)
     {
         // Burning flammables emit light and help visible fire spread.
-        newLight = min(newTemp - 1u, 11u);
+        newLight = min(newTemp, 13u);
     }
     else if (!BlocksLight(mat))
     {

@@ -44,6 +44,7 @@ namespace VoxelEngine
         [SerializeField] private FireSimulationProfile fireProfile = FireSimulationProfile.Realistic;
         [SerializeField] [Range(4, 14)] private int fireSpreadNeighborTemp = 10;
         [SerializeField] [Range(6, 15)] private int woodCharTemp = 13;
+        [SerializeField] [Range(6, 15)] private int grassBurnTemp = 9;
         [SerializeField] [Range(6, 15)] private int leafBurnTemp = 10;
         [SerializeField] [Range(8, 15)] private int coalBurnoutTemp = 15;
         [SerializeField] [Range(2, 8)] private int snowMeltTemp = 5;
@@ -547,6 +548,7 @@ namespace VoxelEngine
                 profile = fireProfile,
                 fireSpreadNeighborTemp = fireSpreadNeighborTemp,
                 woodCharTemp = woodCharTemp,
+                grassBurnTemp = grassBurnTemp,
                 leafBurnTemp = leafBurnTemp,
                 coalBurnoutTemp = coalBurnoutTemp,
                 snowMeltTemp = snowMeltTemp,

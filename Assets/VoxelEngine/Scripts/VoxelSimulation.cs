@@ -21,6 +21,7 @@ namespace VoxelEngine
         public FireSimulationProfile profile;
         [Range(4, 14)] public int fireSpreadNeighborTemp;
         [Range(6, 15)] public int woodCharTemp;
+        [Range(6, 15)] public int grassBurnTemp;
         [Range(6, 15)] public int leafBurnTemp;
         [Range(8, 15)] public int coalBurnoutTemp;
         [Range(2, 8)] public int snowMeltTemp;
@@ -36,6 +37,7 @@ namespace VoxelEngine
             profile = FireSimulationProfile.Realistic,
             fireSpreadNeighborTemp = 10,
             woodCharTemp = 13,
+            grassBurnTemp = 9,
             leafBurnTemp = 10,
             coalBurnoutTemp = 15,
             snowMeltTemp = 5,
@@ -67,6 +69,7 @@ namespace VoxelEngine
 
         private static readonly int PropFireSpreadNeighborTemp = Shader.PropertyToID("_FireSpreadNeighborTemp");
         private static readonly int PropWoodCharTemp = Shader.PropertyToID("_WoodCharTemp");
+        private static readonly int PropGrassBurnTemp = Shader.PropertyToID("_GrassBurnTemp");
         private static readonly int PropLeafBurnTemp = Shader.PropertyToID("_LeafBurnTemp");
         private static readonly int PropCoalBurnoutTemp = Shader.PropertyToID("_CoalBurnoutTemp");
         private static readonly int PropSnowMeltTemp = Shader.PropertyToID("_SnowMeltTemp");
@@ -223,6 +226,7 @@ namespace VoxelEngine
         {
             int spreadTemp = s.fireSpreadNeighborTemp;
             int woodTemp = s.woodCharTemp;
+            int grassTemp = s.grassBurnTemp;
             int leafTemp = s.leafBurnTemp;
             int coalTemp = s.coalBurnoutTemp;
             int snowTemp = s.snowMeltTemp;
@@ -236,6 +240,7 @@ namespace VoxelEngine
             if (s.profile == FireSimulationProfile.Fast)
             {
                 spreadTemp = 7;  woodTemp = 10; leafTemp = 8;
+                grassTemp = 7;
                 coalTemp = 13;   snowTemp = 3;  waterTemp = 10;
                 burnLightTemp = 8; riseRate = 2; decayRate = 1;
                 sinkCool = 0;    burnoutDiv = 5;
@@ -243,6 +248,7 @@ namespace VoxelEngine
             else if (s.profile == FireSimulationProfile.Realistic)
             {
                 spreadTemp = 10; woodTemp = 13; leafTemp = 10;
+                grassTemp = 9;
                 coalTemp = 15;   snowTemp = 5;  waterTemp = 13;
                 burnLightTemp = 10; riseRate = 1; decayRate = 1;
                 sinkCool = 1;    burnoutDiv = 12;
@@ -250,6 +256,7 @@ namespace VoxelEngine
 
             shader.SetInt(PropFireSpreadNeighborTemp, Mathf.Clamp(spreadTemp, 4, 15));
             shader.SetInt(PropWoodCharTemp, Mathf.Clamp(woodTemp, 6, 15));
+            shader.SetInt(PropGrassBurnTemp, Mathf.Clamp(grassTemp, 6, 15));
             shader.SetInt(PropLeafBurnTemp, Mathf.Clamp(leafTemp, 6, 15));
             shader.SetInt(PropCoalBurnoutTemp, Mathf.Clamp(coalTemp, 8, 15));
             shader.SetInt(PropSnowMeltTemp, Mathf.Clamp(snowTemp, 2, 8));
