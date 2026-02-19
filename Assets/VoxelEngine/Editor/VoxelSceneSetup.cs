@@ -5,19 +5,67 @@ using VoxelEngine;
 namespace VoxelEngine.Editor
 {
     /// <summary>
-    /// Menu item to automatically set up a voxel world scene.
-    /// Creates all necessary GameObjects with correct component references.
+    /// Scene bootstrap utilities for VoxelEngine.
+    /// Designed to be resilient when VoxelWorld serialized fields evolve.
     /// </summary>
     public static class VoxelSceneSetup
     {
-        [MenuItem("VoxelEngine/Setup Voxel Scene", false, 100)]
+        private const int DefaultWorldSize = 128;
+        private const float DefaultVoxelScale = 0.25f;
+
+        [MenuItem("VoxelEngine/Editor Tools/Setup Voxel Scene", false, 100)]
         public static void SetupScene()
         {
-            // Find compute shaders
-            var terrainGen = FindAsset<ComputeShader>("TerrainGeneration");
-            var simulation = FindAsset<ComputeShader>("VoxelSimulation");
-            var brickMap = FindAsset<ComputeShader>("BrickMapUpdate");
-            var rayMarchShader = Shader.Find("VoxelEngine/RayMarch");
+            SetupWithSize(DefaultWorldSize);
+        }
+
+        [MenuItem("VoxelEngine/Editor Tools/Setup Voxel Scene", true)]
+        private static bool ValidateSetupScene()
+        {
+            return !Application.isPlaying;
+        }
+
+        [MenuItem("VoxelEngine/Editor Tools/Quick Test (64³)", false, 201)]
+        public static void QuickTest64()
+        {
+            SetupWithSize(64);
+        }
+
+        [MenuItem("VoxelEngine/Editor Tools/Quick Test (128³)", false, 200)]
+        public static void QuickTest128()
+        {
+            SetupWithSize(128);
+        }
+
+        [MenuItem("VoxelEngine/Editor Tools/Quick Test (256³)", false, 202)]
+        public static void QuickTest256()
+        {
+            SetupWithSize(256);
+        }
+
+        [MenuItem("VoxelEngine/Editor Tools/Quick Test (64³)", true)]
+        [MenuItem("VoxelEngine/Editor Tools/Quick Test (128³)", true)]
+        [MenuItem("VoxelEngine/Editor Tools/Quick Test (256³)", true)]
+        private static bool ValidateQuickTests()
+        {
+            return !Application.isPlaying;
+        }
+
+        private static void SetupWithSize(int worldSize)
+        {
+            if (Application.isPlaying)
+            {
+                Debug.LogWarning("[VoxelEngine] Setup is disabled while Play Mode is active.");
+                return;
+            }
+
+            int undoGroup = Undo.GetCurrentGroup();
+            Undo.SetCurrentGroupName("VoxelEngine Setup Scene");
+
+            var terrainGen = FindAssetByNames<ComputeShader>("TerrainGeneration", "VoxelTerrainGeneration");
+            var simulation = FindAssetByNames<ComputeShader>("VoxelSimulation", "Simulation");
+            var brickMap = FindAssetByNames<ComputeShader>("BrickMapUpdate", "VoxelBrickMapUpdate");
+            var rayMarchShader = Shader.Find("VoxelEngine/RayMarch") ?? FindAssetByNames<Shader>("RayMarch");
 
             if (terrainGen == null || simulation == null || brickMap == null)
             {
@@ -31,47 +79,25 @@ namespace VoxelEngine.Editor
                 return;
             }
 
-            // Create root object
-            var existingWorld = Object.FindFirstObjectByType<VoxelWorld>();
-            if (existingWorld != null)
+            VoxelWorld world = Object.FindFirstObjectByType<VoxelWorld>();
+            if (world != null)
             {
                 if (!EditorUtility.DisplayDialog("Voxel Scene Setup",
-                    "A VoxelWorld already exists in the scene. Replace it?", "Yes", "No"))
+                    "A VoxelWorld already exists in the scene. Update setup on existing object?", "Update", "Cancel"))
                     return;
-                Undo.DestroyObjectImmediate(existingWorld.gameObject);
+            }
+            else
+            {
+                var worldGO = new GameObject("VoxelWorld");
+                Undo.RegisterCreatedObjectUndo(worldGO, "Create Voxel World");
+                world = worldGO.AddComponent<VoxelWorld>();
             }
 
-            // --- Voxel World ---
-            var worldGO = new GameObject("VoxelWorld");
-            Undo.RegisterCreatedObjectUndo(worldGO, "Create Voxel World");
+            var worldObject = world.gameObject;
+            var indirectRenderer = EnsureComponent<VoxelIndirectInstanceRenderer>(worldObject);
 
-            var world = worldGO.AddComponent<VoxelWorld>();
-            var indirectRenderer = worldGO.AddComponent<VoxelIndirectInstanceRenderer>();
+            ApplyVoxelWorldDefaults(world, indirectRenderer, terrainGen, simulation, brickMap, rayMarchShader, worldSize);
 
-            // Set serialized fields via SerializedObject
-            var so = new SerializedObject(world);
-            so.FindProperty("terrainGenShader").objectReferenceValue = terrainGen;
-            so.FindProperty("simulationShader").objectReferenceValue = simulation;
-            so.FindProperty("brickMapShader").objectReferenceValue = brickMap;
-            so.FindProperty("rayMarchShader").objectReferenceValue = rayMarchShader;
-            so.FindProperty("indirectInstanceRenderer").objectReferenceValue = indirectRenderer;
-            so.FindProperty("worldSize").intValue = 128;
-            so.FindProperty("voxelScale").floatValue = 0.25f;
-            so.FindProperty("enableShadows").boolValue = true;
-            so.FindProperty("maxRaySteps").intValue = 320;
-            so.FindProperty("maxShadowSteps").intValue = 80;
-            so.FindProperty("enableAdaptiveQuality").boolValue = true;
-            so.FindProperty("movingRaySteps").intValue = 160;
-            so.FindProperty("movingShadowSteps").intValue = 40;
-            var reduceShadowsProp = so.FindProperty("reduceShadowsWhileMoving");
-            if (reduceShadowsProp != null)
-                reduceShadowsProp.boolValue = true;
-            so.FindProperty("simulationTickRate").floatValue = 30f;
-            so.FindProperty("simulationStepsPerFrame").intValue = 1;
-            so.FindProperty("sunDirection").vector3Value = new Vector3(0.5f, 0.8f, 0.3f);
-            so.ApplyModifiedPropertiesWithoutUndo();
-
-            // --- Camera ---
             var cam = Camera.main;
             if (cam == null)
             {
@@ -82,109 +108,225 @@ namespace VoxelEngine.Editor
                 Undo.RegisterCreatedObjectUndo(camGO, "Create Voxel Camera");
             }
 
-            // Position camera above terrain
-            float extent = 128 * 0.25f; // worldSize * voxelScale
+            float extent = worldSize * DefaultVoxelScale;
             cam.transform.position = new Vector3(extent * 0.5f, extent * 0.7f, -extent * 0.2f);
             cam.transform.LookAt(new Vector3(extent * 0.5f, extent * 0.3f, extent * 0.5f));
-            cam.nearClipPlane = 0.1f;
+            cam.nearClipPlane = 0.05f;
             cam.farClipPlane = 500f;
 
-            // Add camera controller
-            if (cam.GetComponent<VoxelCamera>() == null)
-                cam.gameObject.AddComponent<VoxelCamera>();
+            EnsureComponent<VoxelCamera>(cam.gameObject);
 
-            // Add interaction
-            var interaction = cam.GetComponent<VoxelInteraction>();
-            if (interaction == null)
-                interaction = cam.gameObject.AddComponent<VoxelInteraction>();
+            var interaction = EnsureComponent<VoxelInteraction>(cam.gameObject);
 
             var interactionSO = new SerializedObject(interaction);
-            interactionSO.FindProperty("voxelWorld").objectReferenceValue = world;
-            interactionSO.FindProperty("mainCamera").objectReferenceValue = cam;
+            SetObject(interactionSO, "voxelWorld", world);
+            SetObject(interactionSO, "mainCamera", cam);
             interactionSO.ApplyModifiedPropertiesWithoutUndo();
 
-            // --- Debug UI ---
-            var debugGO = new GameObject("VoxelDebugUI");
-            debugGO.transform.SetParent(worldGO.transform);
-            var debugUI = debugGO.AddComponent<VoxelDebugUI>();
+            var debugGO = GetOrCreateChild(worldObject.transform, "VoxelDebugUI");
+            var debugUI = EnsureComponent<VoxelDebugUI>(debugGO);
             var debugSO = new SerializedObject(debugUI);
-            debugSO.FindProperty("voxelWorld").objectReferenceValue = world;
+            SetObject(debugSO, "voxelWorld", world);
             debugSO.ApplyModifiedPropertiesWithoutUndo();
 
-            // --- Collision (optional) ---
-            var collisionGO = new GameObject("VoxelCollision");
-            collisionGO.transform.SetParent(worldGO.transform);
-            collisionGO.AddComponent<MeshCollider>();
-            var collision = collisionGO.AddComponent<VoxelCollision>();
+            var collisionGO = GetOrCreateChild(worldObject.transform, "VoxelCollision");
+            EnsureComponent<MeshCollider>(collisionGO);
+            var collision = EnsureComponent<VoxelCollision>(collisionGO);
             var collisionSO = new SerializedObject(collision);
-            collisionSO.FindProperty("voxelWorld").objectReferenceValue = world;
-            collisionSO.FindProperty("trackTarget").objectReferenceValue = cam.transform;
-            collisionSO.FindProperty("enableCollisionMeshing").boolValue = false;
-            collisionSO.FindProperty("updateInterval").floatValue = 0.4f;
-            collisionSO.FindProperty("collisionRadius").intValue = 12;
+            SetObject(collisionSO, "voxelWorld", world);
+            SetObject(collisionSO, "trackTarget", cam.transform);
+            SetBool(collisionSO, "enableCollisionMeshing", false);
+            SetFloat(collisionSO, "updateInterval", 0.4f);
+            SetInt(collisionSO, "collisionRadius", 12);
             collisionSO.ApplyModifiedPropertiesWithoutUndo();
 
-            // --- Directional Light ---
-            var existingLight = Object.FindFirstObjectByType<Light>();
-            if (existingLight == null || existingLight.type != LightType.Directional)
-            {
-                var lightGO = new GameObject("Directional Light");
-                var light = lightGO.AddComponent<Light>();
-                light.type = LightType.Directional;
-                light.color = new Color(1f, 0.95f, 0.85f);
-                light.intensity = 1.2f;
-                lightGO.transform.rotation = Quaternion.Euler(50, 30, 0);
-                Undo.RegisterCreatedObjectUndo(lightGO, "Create Directional Light");
-            }
+            Light mainDirectional = EnsureDirectionalLight();
+            BindDirectionalLightOverride(world, mainDirectional);
 
-            // Select the world object
-            Selection.activeGameObject = worldGO;
+            Selection.activeGameObject = worldObject;
+
+            Undo.CollapseUndoOperations(undoGroup);
 
             Debug.Log("[VoxelEngine] Scene setup complete! Press Play to see the voxel world.");
             Debug.Log("[VoxelEngine] Controls: WASD=Move, Mouse=Look, LMB=Dig, RMB=Place, 1-9=Material");
         }
 
-        [MenuItem("VoxelEngine/Quick Test (128³)", false, 200)]
-        public static void QuickTest128()
+        private static void ApplyVoxelWorldDefaults(
+            VoxelWorld world,
+            VoxelIndirectInstanceRenderer indirectRenderer,
+            ComputeShader terrainGen,
+            ComputeShader simulation,
+            ComputeShader brickMap,
+            Shader rayMarchShader,
+            int worldSize)
         {
-            SetupWithSize(128);
+            var worldSO = new SerializedObject(world);
+
+            SetObject(worldSO, "terrainGenShader", terrainGen);
+            SetObject(worldSO, "simulationShader", simulation);
+            SetObject(worldSO, "brickMapShader", brickMap);
+            SetObject(worldSO, "rayMarchShader", rayMarchShader);
+            SetObject(worldSO, "indirectInstanceRenderer", indirectRenderer);
+
+            SetInt(worldSO, "worldSize", worldSize);
+            SetInt(worldSO, "brickSize", 8);
+            SetFloat(worldSO, "voxelScale", DefaultVoxelScale);
+
+            SetFloat(worldSO, "terrainScale", 0.02f);
+            SetFloat(worldSO, "caveScale", 0.06f);
+            SetFloat(worldSO, "caveThreshold", 0.72f);
+
+            SetBool(worldSO, "enableSimulation", true);
+            SetInt(worldSO, "simulationStepsPerFrame", 1);
+            SetFloat(worldSO, "simulationTickRate", 30f);
+            SetInt(worldSO, "lightPropagationPasses", 5);
+
+            SetBool(worldSO, "enableShadows", true);
+            SetInt(worldSO, "maxRaySteps", 320);
+            SetInt(worldSO, "maxShadowSteps", 80);
+
+            SetFloat(worldSO, "maxRenderDistance", 80f);
+            SetFloat(worldSO, "distanceQualityFactor", 0.6f);
+            SetFloat(worldSO, "renderDistanceFadeRatio", 0.8f);
+
+            SetBool(worldSO, "enableAdaptiveQuality", true);
+            SetInt(worldSO, "movingRaySteps", 160);
+            SetInt(worldSO, "movingShadowSteps", 40);
+            SetBool(worldSO, "enableGpuAdaptiveQuality", true);
+            SetBool(worldSO, "reduceShadowsWhileMoving", true);
+            SetBool(worldSO, "stabilizeLightingWhileMoving", true);
+
+            SetColor(worldSO, "ambientColor", new Color(0.15f, 0.18f, 0.25f));
+            SetColor(worldSO, "sunColor", new Color(1f, 0.95f, 0.85f));
+            SetFloat(worldSO, "sunIntensity", 1.2f);
+            SetVector3(worldSO, "sunDirection", new Vector3(0.5f, 0.8f, 0.3f));
+
+            SetFloat(worldSO, "fogDensity", 0.003f);
+            SetColor(worldSO, "fogColor", new Color(0.6f, 0.75f, 0.9f));
+
+            worldSO.ApplyModifiedPropertiesWithoutUndo();
         }
 
-        [MenuItem("VoxelEngine/Quick Test (64³)", false, 201)]
-        public static void QuickTest64()
+        private static void BindDirectionalLightOverride(VoxelWorld world, Light directionalLight)
         {
-            SetupWithSize(64);
+            if (world == null || directionalLight == null) return;
+
+            var worldSO = new SerializedObject(world);
+            SetObject(worldSO, "directionalLightOverride", directionalLight);
+            SetBool(worldSO, "syncWithUnityDirectionalLight", true);
+            worldSO.ApplyModifiedPropertiesWithoutUndo();
         }
 
-        [MenuItem("VoxelEngine/Quick Test (256³)", false, 202)]
-        public static void QuickTest256()
+        private static Light EnsureDirectionalLight()
         {
-            SetupWithSize(256);
-        }
-
-        private static void SetupWithSize(int size)
-        {
-            SetupScene();
-            var world = Object.FindFirstObjectByType<VoxelWorld>();
-            if (world != null)
+            var allLights = Object.FindObjectsByType<Light>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            for (int i = 0; i < allLights.Length; i++)
             {
-                var so = new SerializedObject(world);
-                so.FindProperty("worldSize").intValue = size;
-                so.ApplyModifiedProperties();
+                if (allLights[i] != null && allLights[i].type == LightType.Directional)
+                    return allLights[i];
             }
+
+            var lightGO = new GameObject("Directional Light");
+            Undo.RegisterCreatedObjectUndo(lightGO, "Create Directional Light");
+            var light = lightGO.AddComponent<Light>();
+            light.type = LightType.Directional;
+            light.color = new Color(1f, 0.95f, 0.85f);
+            light.intensity = 1.2f;
+            lightGO.transform.rotation = Quaternion.Euler(50f, 30f, 0f);
+            return light;
         }
 
-        private static T FindAsset<T>(string name) where T : Object
+        private static T EnsureComponent<T>(GameObject go) where T : Component
         {
-            string[] guids = AssetDatabase.FindAssets($"{name} t:{typeof(T).Name}");
-            foreach (string guid in guids)
+            var component = go.GetComponent<T>();
+            if (component == null)
+                component = Undo.AddComponent<T>(go);
+            return component;
+        }
+
+        private static GameObject GetOrCreateChild(Transform parent, string childName)
+        {
+            var existing = parent.Find(childName);
+            if (existing != null) return existing.gameObject;
+
+            var go = new GameObject(childName);
+            Undo.RegisterCreatedObjectUndo(go, $"Create {childName}");
+            go.transform.SetParent(parent, false);
+            return go;
+        }
+
+        private static T FindAssetByNames<T>(params string[] candidateNames) where T : Object
+        {
+            if (candidateNames == null || candidateNames.Length == 0)
+                return null;
+
+            string[] guids = AssetDatabase.FindAssets($"t:{typeof(T).Name}");
+            T fallbackContains = null;
+
+            for (int i = 0; i < guids.Length; i++)
             {
-                string path = AssetDatabase.GUIDToAssetPath(guid);
+                string path = AssetDatabase.GUIDToAssetPath(guids[i]);
                 T asset = AssetDatabase.LoadAssetAtPath<T>(path);
-                if (asset != null && asset.name == name)
-                    return asset;
+                if (asset == null)
+                    continue;
+
+                string assetName = asset.name;
+                for (int j = 0; j < candidateNames.Length; j++)
+                {
+                    if (assetName == candidateNames[j])
+                        return asset;
+
+                    if (fallbackContains == null &&
+                        assetName.IndexOf(candidateNames[j], System.StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        fallbackContains = asset;
+                    }
+                }
             }
-            return null;
+
+            return fallbackContains;
+        }
+
+        private static void SetObject(SerializedObject so, string propertyName, Object value)
+        {
+            SerializedProperty property = so.FindProperty(propertyName);
+            if (property != null)
+                property.objectReferenceValue = value;
+        }
+
+        private static void SetBool(SerializedObject so, string propertyName, bool value)
+        {
+            SerializedProperty property = so.FindProperty(propertyName);
+            if (property != null)
+                property.boolValue = value;
+        }
+
+        private static void SetInt(SerializedObject so, string propertyName, int value)
+        {
+            SerializedProperty property = so.FindProperty(propertyName);
+            if (property != null)
+                property.intValue = value;
+        }
+
+        private static void SetFloat(SerializedObject so, string propertyName, float value)
+        {
+            SerializedProperty property = so.FindProperty(propertyName);
+            if (property != null)
+                property.floatValue = value;
+        }
+
+        private static void SetColor(SerializedObject so, string propertyName, Color value)
+        {
+            SerializedProperty property = so.FindProperty(propertyName);
+            if (property != null)
+                property.colorValue = value;
+        }
+
+        private static void SetVector3(SerializedObject so, string propertyName, Vector3 value)
+        {
+            SerializedProperty property = so.FindProperty(propertyName);
+            if (property != null)
+                property.vector3Value = value;
         }
     }
 }

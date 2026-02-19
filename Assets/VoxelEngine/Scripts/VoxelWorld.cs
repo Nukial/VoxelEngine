@@ -1,27 +1,24 @@
 using UnityEngine;
-using UnityEngine.Rendering;
 using System.Collections.Generic;
 
 namespace VoxelEngine
 {
     /// <summary>
-    /// Main voxel world manager. Creates and manages GPU buffers,
-    /// coordinates rendering, simulation, and collision sub-systems.
+    /// Main voxel world coordinator. Owns serialized configuration and delegates
+    /// to focused sub-systems: buffers, terrain, simulation, rendering, quality, and readback.
+    /// The public API (SetVoxel, RaycastVoxel, etc.) is preserved for external scripts.
     /// </summary>
     public class VoxelWorld : MonoBehaviour
     {
-        private enum FireSimulationProfile
-        {
-            Fast,
-            Realistic,
-            Custom
-        }
-
         private struct VoxelWrite
         {
             public int index;
             public uint value;
         }
+
+        // =================================================================
+        // Serialized Configuration
+        // =================================================================
 
         [Header("World Configuration")]
         [SerializeField] private int worldSize = 128;
@@ -111,102 +108,38 @@ namespace VoxelEngine
         [SerializeField] [Min(0.01f)] private float cpuReadbackInterval = 0.08f;
         [SerializeField] private bool useAsyncCpuReadback = true;
 
-        // GPU Buffers
-        private GraphicsBuffer _voxelBufferA;
-        private GraphicsBuffer _voxelBufferB;
-        private GraphicsBuffer _brickMapBuffer;
-        private bool _pingPong;
+        // =================================================================
+        // Sub-systems (plain C# objects — no extra MonoBehaviours needed)
+        // =================================================================
 
-        // Rendering
-        private Material _rayMarchMaterial;
-        private MeshFilter _meshFilter;
-        private MeshRenderer _meshRenderer;
+        private VoxelBufferManager _buffers;
+        private VoxelTerrainGenerator _terrain;
+        private VoxelSimulation _simulation;
+        private VoxelRenderer _renderer;
+        private VoxelAdaptiveQuality _quality;
+        private VoxelCpuReadback _cpuReadback;
 
-        // Compute kernel IDs
-        private int _terrainKernel;
-        private int _clearKernel;
-        private int _simKernel;
-        private int _simClearKernel;
-        private int _brickMapKernel;
-        private int _heatLightKernel;
-        private int _lightOnlyKernel;
-        private bool _kernelsCached;
-
-        // Frame counter for simulation randomness
         private uint _frameCount;
-        private uint _simStep;
-        private const int CpuReadbackSlotCount = 2;
-        private uint[][] _cpuReadbackSlots = new uint[CpuReadbackSlotCount][];
-        private int _cpuReadbackFrontSlot;
-        private int _cpuReadbackInFlightSlot = -1;
-        private float _lastCpuReadbackTime = -999f;
-        private bool _cpuReadbackReady;
-        private bool _cpuReadbackRequestPending;
-        private Vector3 _lastCameraPos;
-        private bool _cameraPosInitialized;
-        private float _simulationAccumulator;
-        private float _motionBlend; // 0=still, 1=moving, smoothly interpolated
-        private float _gpuLoadBlend; // 0=light GPU load, 1=GPU saturated
-        private Quaternion _lastCameraRot;
-        private Light _cachedDirectionalLight;
-        private float _nextDirectionalLightSearchTime;
-        private float _smoothedShadowRayMaxDist;
-        private float _smoothedFastLightingMaxDist;
-        private bool _smoothedShadowParamsInit;
 
-        // Properties for external access
+        // =================================================================
+        // Public API (unchanged — external scripts keep working)
+        // =================================================================
+
         public int WorldSize => worldSize;
         public int BrickSize => brickSize;
         public float VoxelScale => voxelScale;
         public int BrickMapSize => worldSize / brickSize;
         public int TotalVoxels => worldSize * worldSize * worldSize;
-        public GraphicsBuffer ReadBuffer => _pingPong ? _voxelBufferB : _voxelBufferA;
-        public GraphicsBuffer WriteBuffer => _pingPong ? _voxelBufferA : _voxelBufferB;
-        public GraphicsBuffer BrickMapBuffer => _brickMapBuffer;
+        public GraphicsBuffer ReadBuffer => _buffers?.ReadBuffer;
+        public GraphicsBuffer WriteBuffer => _buffers?.WriteBuffer;
+        public GraphicsBuffer BrickMapBuffer => _buffers?.BrickMapBuffer;
         public Vector3 WorldOrigin => transform.position;
         public float WorldExtent => worldSize * voxelScale;
         public VoxelIndirectInstanceRenderer IndirectInstanceRenderer => indirectInstanceRenderer;
 
-        // Shader property IDs (cached)
-        private static readonly int PropVoxelBuffer = Shader.PropertyToID("_VoxelBuffer");
-        private static readonly int PropBrickMap = Shader.PropertyToID("_BrickMap");
-        private static readonly int PropWorldSize = Shader.PropertyToID("_WorldSize");
-        private static readonly int PropBrickSize = Shader.PropertyToID("_BrickSize");
-        private static readonly int PropBrickMapSize = Shader.PropertyToID("_BrickMapSize");
-        private static readonly int PropVoxelScale = Shader.PropertyToID("_VoxelScale");
-        private static readonly int PropWorldOrigin = Shader.PropertyToID("_WorldOrigin");
-        private static readonly int PropMaxSteps = Shader.PropertyToID("_MaxSteps");
-        private static readonly int PropMaxShadowSteps = Shader.PropertyToID("_MaxShadowSteps");
-        private static readonly int PropSunDir = Shader.PropertyToID("_SunDir");
-        private static readonly int PropSunColor = Shader.PropertyToID("_SunColor");
-        private static readonly int PropAmbientColor = Shader.PropertyToID("_AmbientColor");
-        private static readonly int PropSunIntensity = Shader.PropertyToID("_SunIntensity");
-        private static readonly int PropFogDensity = Shader.PropertyToID("_FogDensity");
-        private static readonly int PropFogColor = Shader.PropertyToID("_FogColor");
-        private static readonly int PropReadBuffer = Shader.PropertyToID("_ReadBuffer");
-        private static readonly int PropWriteBuffer = Shader.PropertyToID("_WriteBuffer");
-        private static readonly int PropFrameCount = Shader.PropertyToID("_FrameCount");
-        private static readonly int PropSimStep = Shader.PropertyToID("_SimStep");
-        private static readonly int PropSeed = Shader.PropertyToID("_Seed");
-        private static readonly int PropTerrainScale = Shader.PropertyToID("_TerrainScale");
-        private static readonly int PropCaveScale = Shader.PropertyToID("_CaveScale");
-        private static readonly int PropCaveThreshold = Shader.PropertyToID("_CaveThreshold");
-        private static readonly int PropWaterLevel = Shader.PropertyToID("_WaterLevel");
-        private static readonly int PropMaxRenderDist = Shader.PropertyToID("_MaxRenderDist");
-        private static readonly int PropShadowStrength = Shader.PropertyToID("_ShadowStrength");
-        private static readonly int PropFastLightingMaxDist = Shader.PropertyToID("_FastLightingMaxDist");
-        private static readonly int PropShadowRayMaxDist = Shader.PropertyToID("_ShadowRayMaxDist");
-        private static readonly int PropFireSpreadNeighborTemp = Shader.PropertyToID("_FireSpreadNeighborTemp");
-        private static readonly int PropWoodCharTemp = Shader.PropertyToID("_WoodCharTemp");
-        private static readonly int PropLeafBurnTemp = Shader.PropertyToID("_LeafBurnTemp");
-        private static readonly int PropCoalBurnoutTemp = Shader.PropertyToID("_CoalBurnoutTemp");
-        private static readonly int PropSnowMeltTemp = Shader.PropertyToID("_SnowMeltTemp");
-        private static readonly int PropWaterEvapTemp = Shader.PropertyToID("_WaterEvapTemp");
-        private static readonly int PropBurningLightTemp = Shader.PropertyToID("_BurningLightTemp");
-        private static readonly int PropHeatRiseRate = Shader.PropertyToID("_HeatRiseRate");
-        private static readonly int PropCoolRate = Shader.PropertyToID("_CoolRate");
-        private static readonly int PropHeatSinkExtraCool = Shader.PropertyToID("_HeatSinkExtraCool");
-        private static readonly int PropCoalBurnoutChanceDiv = Shader.PropertyToID("_CoalBurnoutChanceDiv");
+        // =================================================================
+        // Lifecycle
+        // =================================================================
 
         private void OnEnable()
         {
@@ -222,671 +155,104 @@ namespace VoxelEngine
         {
             if (!Application.isPlaying) return;
 
-            // Run simulation
             if (enableSimulation)
             {
-                bool simulated = RunScheduledSimulation();
+                bool simulated = _simulation.RunScheduled(
+                    simulationShader, brickMapShader, _buffers, _frameCount,
+                    simulationTickRate, simulationStepsPerFrame, lightPropagationPasses,
+                    BuildFireSettings());
+
                 if (simulated)
-                    UpdateBrickMap();
+                    _simulation.UpdateBrickMap(brickMapShader, _buffers);
             }
 
-            // Update rendering properties
-            UpdateRenderProperties();
+            // Adaptive quality
+            _quality.Update(
+                maxRaySteps, maxShadowSteps,
+                enableAdaptiveQuality, movingRaySteps, movingShadowSteps,
+                movingShadowStepFloor, cameraMotionThreshold, qualityTransitionSpeed,
+                enableGpuAdaptiveQuality, gpuTargetFrameRate,
+                gpuRayStepFloor, gpuShadowStepFloor,
+                enableEdgeLoadGuard, edgeLoadDistance,
+                edgeRayStepScale, edgeShadowStepScale,
+                maxRenderDistance, distanceQualityFactor, renderDistanceFadeRatio,
+                WorldOrigin, WorldExtent);
 
-            UpdateCpuReadbackCache();
+            // Lighting sync
+            _renderer.SyncLightingFromUnity(syncWithUnityDirectionalLight, directionalLightOverride,
+                syncAmbientFromRenderSettings, ref ambientColor, ref sunColor,
+                ref sunDirection, ref sunIntensity);
+
+            // Render properties
+            _renderer.UpdateProperties(_buffers, _quality,
+                WorldOrigin, voxelScale, maxRenderDistance,
+                enableShadows, reduceShadowsWhileMoving, stabilizeLightingWhileMoving,
+                movingShadowIntensity, fastLightingDistanceRatio, shadowRayDistanceRatio,
+                qualityTransitionSpeed,
+                sunColor, sunDirection, sunIntensity,
+                ambientColor, fogDensity, fogColor);
+
+            // CPU readback
+            _cpuReadback.UpdateCache(ReadBuffer, TotalVoxels, cpuReadbackInterval, useAsyncCpuReadback);
 
             _frameCount++;
         }
 
-        private bool RunScheduledSimulation()
-        {
-            float tickRate = Mathf.Max(1f, simulationTickRate);
-            float tickInterval = 1f / tickRate;
-            _simulationAccumulator += Time.deltaTime;
-
-            int maxSteps = Mathf.Max(1, simulationStepsPerFrame);
-            bool simulated = false;
-
-            while (_simulationAccumulator >= tickInterval && maxSteps > 0)
-            {
-                RunSimulationStep();
-                _simulationAccumulator -= tickInterval;
-                maxSteps--;
-                simulated = true;
-            }
-
-            if (_simulationAccumulator > tickInterval * 4f)
-                _simulationAccumulator = tickInterval;
-
-            return simulated;
-        }
-
-        private void UpdateCpuReadbackCache()
-        {
-            if (ReadBuffer == null) return;
-
-            EnsureCpuReadbackSlots();
-            if (Time.time - _lastCpuReadbackTime < cpuReadbackInterval) return;
-
-            if (!useAsyncCpuReadback)
-            {
-                ReadBuffer.GetData(_cpuReadbackSlots[_cpuReadbackFrontSlot]);
-                _cpuReadbackReady = true;
-                _lastCpuReadbackTime = Time.time;
-                return;
-            }
-
-            RequestAsyncCpuReadback(force: false);
-        }
-
-        private void EnsureCpuReadbackSlots()
-        {
-            int total = TotalVoxels;
-            bool resized = false;
-
-            for (int i = 0; i < CpuReadbackSlotCount; i++)
-            {
-                if (_cpuReadbackSlots[i] == null || _cpuReadbackSlots[i].Length != total)
-                {
-                    _cpuReadbackSlots[i] = new uint[total];
-                    resized = true;
-                }
-            }
-
-            if (resized)
-                _cpuReadbackReady = false;
-        }
-
-        private void RequestAsyncCpuReadback(bool force)
-        {
-            if (ReadBuffer == null) return;
-            if (_cpuReadbackRequestPending) return;
-            if (!force && Time.time - _lastCpuReadbackTime < cpuReadbackInterval) return;
-
-            int targetSlot = 1 - _cpuReadbackFrontSlot;
-            _cpuReadbackRequestPending = true;
-            _cpuReadbackInFlightSlot = targetSlot;
-            _lastCpuReadbackTime = Time.time;
-            AsyncGPUReadback.Request(ReadBuffer, (request) =>
-            {
-                _cpuReadbackRequestPending = false;
-                int slotIndex = _cpuReadbackInFlightSlot;
-                _cpuReadbackInFlightSlot = -1;
-
-                if (!this || request.hasError) return;
-                if (slotIndex < 0 || slotIndex >= CpuReadbackSlotCount) return;
-
-                var data = request.GetData<uint>();
-                var slot = _cpuReadbackSlots[slotIndex];
-                if (slot == null || slot.Length != data.Length)
-                {
-                    slot = new uint[data.Length];
-                    _cpuReadbackSlots[slotIndex] = slot;
-                }
-
-                data.CopyTo(slot);
-                _cpuReadbackFrontSlot = slotIndex;
-                _cpuReadbackReady = true;
-            });
-        }
-
-        // =====================================================================
-        // Initialization
-        // =====================================================================
+        // =================================================================
+        // Initialization / Cleanup
+        // =================================================================
 
         private void Initialize()
         {
-            _smoothedShadowParamsInit = false;
-            CreateBuffers();
-            CacheKernelIDs();
-            CreateRenderingComponents();
-            GenerateTerrain();
-            UpdateBrickMap();
-            UpdateRenderProperties();
+            _buffers = new VoxelBufferManager();
+            _terrain = new VoxelTerrainGenerator();
+            _simulation = new VoxelSimulation();
+            _renderer = new VoxelRenderer();
+            _quality = new VoxelAdaptiveQuality();
+            _cpuReadback = new VoxelCpuReadback();
+
+            _buffers.Create(worldSize, brickSize);
+            _simulation.CacheKernelIDs(simulationShader, brickMapShader);
+            _renderer.Initialize(gameObject, rayMarchShader, enableShadows, WorldExtent,
+                ref indirectInstanceRenderer);
+            _terrain.Generate(terrainGenShader, _buffers, seed, terrainScale, caveScale, caveThreshold);
+            _simulation.UpdateBrickMap(brickMapShader, _buffers);
+
+            // Initial render update
+            _quality.Update(
+                maxRaySteps, maxShadowSteps,
+                enableAdaptiveQuality, movingRaySteps, movingShadowSteps,
+                movingShadowStepFloor, cameraMotionThreshold, qualityTransitionSpeed,
+                enableGpuAdaptiveQuality, gpuTargetFrameRate,
+                gpuRayStepFloor, gpuShadowStepFloor,
+                enableEdgeLoadGuard, edgeLoadDistance,
+                edgeRayStepScale, edgeShadowStepScale,
+                maxRenderDistance, distanceQualityFactor, renderDistanceFadeRatio,
+                WorldOrigin, WorldExtent);
+
+            _renderer.UpdateProperties(_buffers, _quality,
+                WorldOrigin, voxelScale, maxRenderDistance,
+                enableShadows, reduceShadowsWhileMoving, stabilizeLightingWhileMoving,
+                movingShadowIntensity, fastLightingDistanceRatio, shadowRayDistanceRatio,
+                qualityTransitionSpeed,
+                sunColor, sunDirection, sunIntensity,
+                ambientColor, fogDensity, fogColor);
         }
 
-        private void CacheKernelIDs()
+        private void Cleanup()
         {
-            if (_kernelsCached) return;
-
-            if (simulationShader != null)
-            {
-                _simClearKernel = simulationShader.FindKernel("ClearWriteBuffer");
-                _simKernel = simulationShader.FindKernel("SimulateVoxels");
-                _heatLightKernel = simulationShader.FindKernel("PropagateHeatAndLight");
-                _lightOnlyKernel = simulationShader.FindKernel("PropagateLightOnly");
-            }
-
-            if (brickMapShader != null)
-                _brickMapKernel = brickMapShader.FindKernel("UpdateBrickMap");
-
-            _kernelsCached = true;
+            _renderer?.Cleanup();
+            _buffers?.Release();
+            _cpuReadback?.Reset();
+            _simulation?.Reset();
         }
 
-        private void CreateBuffers()
-        {
-            int total = TotalVoxels;
-            int brickTotal = BrickMapSize * BrickMapSize * BrickMapSize;
-
-            _voxelBufferA = new GraphicsBuffer(GraphicsBuffer.Target.Structured, total, sizeof(uint));
-            _voxelBufferB = new GraphicsBuffer(GraphicsBuffer.Target.Structured, total, sizeof(uint));
-            _brickMapBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, brickTotal, sizeof(uint));
-
-            // Clear buffers
-            var clearData = new uint[total];
-            _voxelBufferA.SetData(clearData);
-            _voxelBufferB.SetData(clearData);
-
-            var clearBrick = new uint[brickTotal];
-            _brickMapBuffer.SetData(clearBrick);
-
-            Debug.Log($"[VoxelWorld] Created buffers: {worldSize}³ = {total:N0} voxels ({total * 4 / 1024f / 1024f:F1} MB per buffer)");
-        }
-
-        private void CreateRenderingComponents()
-        {
-            if (indirectInstanceRenderer == null)
-                indirectInstanceRenderer = GetComponent<VoxelIndirectInstanceRenderer>();
-
-            if (rayMarchShader == null)
-            {
-                rayMarchShader = Shader.Find("VoxelEngine/RayMarch");
-                if (rayMarchShader == null)
-                {
-                    Debug.LogError("[VoxelWorld] RayMarch shader not found!");
-                    return;
-                }
-            }
-
-            _rayMarchMaterial = new Material(rayMarchShader);
-            _rayMarchMaterial.name = "VoxelRayMarch (Runtime)";
-
-            // Enable shadow keyword
-            if (enableShadows)
-                _rayMarchMaterial.EnableKeyword("VOXEL_SHADOWS_ON");
-            else
-                _rayMarchMaterial.DisableKeyword("VOXEL_SHADOWS_ON");
-
-            // Create box mesh covering the voxel volume
-            _meshFilter = gameObject.GetComponent<MeshFilter>();
-            if (_meshFilter == null)
-                _meshFilter = gameObject.AddComponent<MeshFilter>();
-
-            _meshRenderer = gameObject.GetComponent<MeshRenderer>();
-            if (_meshRenderer == null)
-                _meshRenderer = gameObject.AddComponent<MeshRenderer>();
-
-            _meshFilter.sharedMesh = CreateBoxMesh();
-            _meshRenderer.sharedMaterial = _rayMarchMaterial;
-            _meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
-            _meshRenderer.receiveShadows = false;
-
-            // Set transform to position the box
-            // Box mesh is unit cube [0,1], scale to world size
-            float extent = WorldExtent;
-            transform.localScale = new Vector3(extent, extent, extent);
-        }
-
-        private Mesh CreateBoxMesh()
-        {
-            // Unit cube with margin to prevent near-plane clipping when camera
-            // is near volume edges. Extends slightly beyond [0,1] on each side.
-            var mesh = new Mesh();
-            mesh.name = "VoxelVolume";
-
-            const float m = 0.12f; // margin - large enough to prevent near-plane clipping
-            float lo = -m;
-            float hi = 1f + m;
-
-            Vector3[] verts = {
-                // Front face
-                new Vector3(lo, lo, hi), new Vector3(hi, lo, hi), new Vector3(hi, hi, hi), new Vector3(lo, hi, hi),
-                // Back face
-                new Vector3(hi, lo, lo), new Vector3(lo, lo, lo), new Vector3(lo, hi, lo), new Vector3(hi, hi, lo),
-                // Top face
-                new Vector3(lo, hi, hi), new Vector3(hi, hi, hi), new Vector3(hi, hi, lo), new Vector3(lo, hi, lo),
-                // Bottom face
-                new Vector3(lo, lo, lo), new Vector3(hi, lo, lo), new Vector3(hi, lo, hi), new Vector3(lo, lo, hi),
-                // Right face
-                new Vector3(hi, lo, hi), new Vector3(hi, lo, lo), new Vector3(hi, hi, lo), new Vector3(hi, hi, hi),
-                // Left face
-                new Vector3(lo, lo, lo), new Vector3(lo, lo, hi), new Vector3(lo, hi, hi), new Vector3(lo, hi, lo),
-            };
-
-            int[] tris = {
-                0,2,1, 0,3,2,       // Front
-                4,6,5, 4,7,6,       // Back
-                8,10,9, 8,11,10,    // Top
-                12,14,13, 12,15,14, // Bottom
-                16,18,17, 16,19,18, // Right
-                20,22,21, 20,23,22, // Left
-            };
-
-            mesh.vertices = verts;
-            mesh.triangles = tris;
-            mesh.RecalculateBounds();
-
-            return mesh;
-        }
-
-        // =====================================================================
-        // Terrain Generation
-        // =====================================================================
-
-        private void GenerateTerrain()
-        {
-            if (terrainGenShader == null)
-            {
-                Debug.LogError("[VoxelWorld] TerrainGeneration compute shader not assigned!");
-                return;
-            }
-
-            _terrainKernel = terrainGenShader.FindKernel("GenerateTerrain");
-
-            terrainGenShader.SetBuffer(_terrainKernel, PropVoxelBuffer, _voxelBufferA);
-            terrainGenShader.SetInt(PropWorldSize, worldSize);
-            terrainGenShader.SetFloat(PropSeed, seed);
-            terrainGenShader.SetFloat(PropTerrainScale, terrainScale);
-            terrainGenShader.SetFloat(PropCaveScale, caveScale);
-            terrainGenShader.SetFloat(PropCaveThreshold, caveThreshold);
-            terrainGenShader.SetInt(PropWaterLevel, Mathf.RoundToInt(worldSize * 0.3f));
-
-            int groups = Mathf.CeilToInt(worldSize / 4f);
-            terrainGenShader.Dispatch(_terrainKernel, groups, groups, groups);
-
-            // Copy A to B for initial state using a compute shader or manual copy
-            var tempData = new uint[TotalVoxels];
-            _voxelBufferA.GetData(tempData);
-            _voxelBufferB.SetData(tempData);
-
-            Debug.Log("[VoxelWorld] Terrain generated successfully");
-        }
-
-        // =====================================================================
-        // Simulation
-        // =====================================================================
-
-        private void RunSimulationStep()
-        {
-            if (simulationShader == null) return;
-            CacheKernelIDs();
-
-            var readBuf = ReadBuffer;
-            var writeBuf = WriteBuffer;
-            int simGroups = Mathf.CeilToInt(worldSize / 4f);
-
-            // Phase 1: Clear write buffer
-            simulationShader.SetBuffer(_simClearKernel, PropWriteBuffer, writeBuf);
-            simulationShader.SetInt(PropWorldSize, worldSize);
-            int clearGroups = Mathf.CeilToInt(TotalVoxels / 256f);
-            simulationShader.Dispatch(_simClearKernel, clearGroups, 1, 1);
-
-            // Phase 2: Simulate (movement + chemical reactions)
-            simulationShader.SetBuffer(_simKernel, PropReadBuffer, readBuf);
-            simulationShader.SetBuffer(_simKernel, PropWriteBuffer, writeBuf);
-            simulationShader.SetInt(PropWorldSize, worldSize);
-            simulationShader.SetInt(PropFrameCount, (int)_frameCount);
-            simulationShader.SetInt(PropSimStep, (int)_simStep);
-            simulationShader.Dispatch(_simKernel, simGroups, simGroups, simGroups);
-
-            // Phase 3: Heat + Light + State changes (writeBuf -> readBuf)
-            // The kernel writes every position (air=0), so no separate clear needed.
-            simulationShader.SetBuffer(_heatLightKernel, PropReadBuffer, writeBuf);
-            simulationShader.SetBuffer(_heatLightKernel, PropWriteBuffer, readBuf);
-            simulationShader.SetInt(PropWorldSize, worldSize);
-            simulationShader.SetInt(PropFrameCount, (int)_frameCount);
-            ApplyFireSimulationTuning(_heatLightKernel);
-            simulationShader.Dispatch(_heatLightKernel, simGroups, simGroups, simGroups);
-
-            // Phase 4: Multi-pass light-only propagation for faster convergence.
-            // Reduces flickering by allowing light to propagate multiple voxels per tick.
-            // After Phase 3, result is in readBuf. Extra passes ping-pong between buffers.
-            // Must use an even number of extra passes so final result stays in readBuf.
-            int extraPasses = Mathf.Max(0, lightPropagationPasses - 1);
-            if (extraPasses % 2 != 0) extraPasses++;
-
-            for (int pass = 0; pass < extraPasses; pass++)
-            {
-                bool readFromRead = (pass % 2 == 0);
-                var src = readFromRead ? readBuf : writeBuf;
-                var dst = readFromRead ? writeBuf : readBuf;
-
-                simulationShader.SetBuffer(_lightOnlyKernel, PropReadBuffer, src);
-                simulationShader.SetBuffer(_lightOnlyKernel, PropWriteBuffer, dst);
-                simulationShader.Dispatch(_lightOnlyKernel, simGroups, simGroups, simGroups);
-            }
-
-            _simStep++;
-        }
-
-        private void ApplyFireSimulationTuning(int kernel)
-        {
-            int spreadTemp = fireSpreadNeighborTemp;
-            int woodTemp = woodCharTemp;
-            int leafTemp = leafBurnTemp;
-            int coalTemp = coalBurnoutTemp;
-            int snowTemp = snowMeltTemp;
-            int waterTemp = waterEvapTemp;
-            int burnLightTemp = burningLightTemp;
-            int riseRate = heatRiseRate;
-            int decayRate = coolRate;
-            int sinkCool = heatSinkExtraCool;
-            int burnoutDiv = coalBurnoutChanceDiv;
-
-            if (fireProfile == FireSimulationProfile.Fast)
-            {
-                spreadTemp = 7;
-                woodTemp = 10;
-                leafTemp = 8;
-                coalTemp = 13;
-                snowTemp = 3;
-                waterTemp = 10;
-                burnLightTemp = 8;
-                riseRate = 2;
-                decayRate = 1;
-                sinkCool = 0;
-                burnoutDiv = 5;
-            }
-            else if (fireProfile == FireSimulationProfile.Realistic)
-            {
-                spreadTemp = 10;
-                woodTemp = 13;
-                leafTemp = 10;
-                coalTemp = 15;
-                snowTemp = 5;
-                waterTemp = 13;
-                burnLightTemp = 10;
-                riseRate = 1;
-                decayRate = 1;
-                sinkCool = 1;
-                burnoutDiv = 12;
-            }
-
-            simulationShader.SetInt(PropFireSpreadNeighborTemp, Mathf.Clamp(spreadTemp, 4, 15));
-            simulationShader.SetInt(PropWoodCharTemp, Mathf.Clamp(woodTemp, 6, 15));
-            simulationShader.SetInt(PropLeafBurnTemp, Mathf.Clamp(leafTemp, 6, 15));
-            simulationShader.SetInt(PropCoalBurnoutTemp, Mathf.Clamp(coalTemp, 8, 15));
-            simulationShader.SetInt(PropSnowMeltTemp, Mathf.Clamp(snowTemp, 2, 8));
-            simulationShader.SetInt(PropWaterEvapTemp, Mathf.Clamp(waterTemp, 8, 15));
-            simulationShader.SetInt(PropBurningLightTemp, Mathf.Clamp(burnLightTemp, 6, 15));
-            simulationShader.SetInt(PropHeatRiseRate, Mathf.Clamp(riseRate, 1, 3));
-            simulationShader.SetInt(PropCoolRate, Mathf.Clamp(decayRate, 1, 3));
-            simulationShader.SetInt(PropHeatSinkExtraCool, Mathf.Clamp(sinkCool, 0, 2));
-            simulationShader.SetInt(PropCoalBurnoutChanceDiv, Mathf.Max(2, burnoutDiv));
-        }
-
-        // =====================================================================
-        // Brick Map
-        // =====================================================================
-
-        private void UpdateBrickMap()
-        {
-            if (brickMapShader == null) return;
-            CacheKernelIDs();
-
-            brickMapShader.SetBuffer(_brickMapKernel, PropVoxelBuffer, ReadBuffer);
-            brickMapShader.SetBuffer(_brickMapKernel, PropBrickMap, _brickMapBuffer);
-            brickMapShader.SetInt(PropWorldSize, worldSize);
-            brickMapShader.SetInt(PropBrickSize, brickSize);
-            brickMapShader.SetInt(PropBrickMapSize, BrickMapSize);
-
-            brickMapShader.Dispatch(_brickMapKernel, BrickMapSize, BrickMapSize, BrickMapSize);
-        }
-
-        // =====================================================================
-        // Render Property Updates
-        // =====================================================================
-
-        private void UpdateRenderProperties()
-        {
-            if (_rayMarchMaterial == null) return;
-
-            UpdateLightingFromUnity();
-
-            // Smooth motion detection: interpolate between still/moving states
-            float rawMotion = GetCameraMotionIntensity();
-            float targetBlend = rawMotion > 0f ? Mathf.Clamp01(rawMotion) : 0f;
-            _motionBlend = Mathf.Lerp(_motionBlend, targetBlend,
-                Time.deltaTime * qualityTransitionSpeed);
-            // Snap to 0 when very close to avoid perpetual micro-blend
-            if (_motionBlend < 0.01f) _motionBlend = 0f;
-
-            int runtimeMaxRaySteps = maxRaySteps;
-            int runtimeMaxShadowSteps = maxShadowSteps;
-
-            if (enableGpuAdaptiveQuality)
-            {
-                float targetFrameTime = 1f / Mathf.Max(1f, gpuTargetFrameRate);
-                float smoothedFrame = Mathf.Max(Time.smoothDeltaTime, Time.deltaTime);
-                float gpuPressure = Mathf.Clamp01((smoothedFrame - targetFrameTime) / Mathf.Max(targetFrameTime * 0.8f, 0.0001f));
-                _gpuLoadBlend = Mathf.Lerp(_gpuLoadBlend, gpuPressure, Time.deltaTime * qualityTransitionSpeed * 0.7f);
-            }
-            else
-            {
-                _gpuLoadBlend = 0f;
-            }
-
-            if (enableAdaptiveQuality && _motionBlend > 0f)
-            {
-                // Smoothly blend ray steps between full quality and moving quality
-                runtimeMaxRaySteps = Mathf.RoundToInt(
-                    Mathf.Lerp(maxRaySteps, Mathf.Min(maxRaySteps, movingRaySteps), _motionBlend));
-
-                int movingShadowTarget = Mathf.Min(maxShadowSteps, movingShadowSteps);
-                int shadowFloor = Mathf.RoundToInt(maxShadowSteps * movingShadowStepFloor);
-                movingShadowTarget = Mathf.Max(movingShadowTarget, shadowFloor);
-                runtimeMaxShadowSteps = Mathf.RoundToInt(
-                    Mathf.Lerp(maxShadowSteps, movingShadowTarget, _motionBlend));
-            }
-
-            if (enableGpuAdaptiveQuality && _gpuLoadBlend > 0f)
-            {
-                int gpuRayTarget = Mathf.Max(64, Mathf.RoundToInt(maxRaySteps * gpuRayStepFloor));
-                int gpuShadowTarget = Mathf.Max(8, Mathf.RoundToInt(maxShadowSteps * gpuShadowStepFloor));
-                runtimeMaxRaySteps = Mathf.RoundToInt(Mathf.Lerp(runtimeMaxRaySteps, gpuRayTarget, _gpuLoadBlend));
-                runtimeMaxShadowSteps = Mathf.RoundToInt(Mathf.Lerp(runtimeMaxShadowSteps, gpuShadowTarget, _gpuLoadBlend));
-            }
-
-            // Cull Front is hardcoded in the shader — back faces are always
-            // rendered so ray-marching works from any camera position.
-
-            // Distance-based quality scaling
-            var camera = Camera.main;
-            if (camera != null)
-            {
-                float distToCenter = Vector3.Distance(camera.transform.position,
-                    WorldOrigin + Vector3.one * WorldExtent * 0.5f);
-
-                float effectiveMaxDist = Mathf.Max(1f, maxRenderDistance);
-                float fadeStart = effectiveMaxDist * Mathf.Clamp01(renderDistanceFadeRatio);
-                float fadeRange = Mathf.Max(0.001f, effectiveMaxDist - fadeStart);
-                float distRatio = Mathf.Clamp01((distToCenter - fadeStart) / fadeRange);
-
-                float qualityMult = Mathf.Lerp(1f, distanceQualityFactor, distRatio);
-                runtimeMaxRaySteps = Mathf.Max(64, Mathf.RoundToInt(runtimeMaxRaySteps * qualityMult));
-                runtimeMaxShadowSteps = Mathf.Max(16, Mathf.RoundToInt(runtimeMaxShadowSteps * qualityMult));
-
-                if (enableEdgeLoadGuard)
-                {
-                    bool insideVolume = IsCameraInsideVolume(0f);
-                    if (!insideVolume)
-                    {
-                        float distanceToBounds = GetDistanceToVolumeBounds(camera.transform.position);
-                        float edgeFactor = 1f - Mathf.Clamp01(distanceToBounds / Mathf.Max(0.1f, edgeLoadDistance));
-
-                        if (edgeFactor > 0f)
-                        {
-                            float rayScale = Mathf.Lerp(1f, edgeRayStepScale, edgeFactor);
-                            float shadowScale = Mathf.Lerp(1f, edgeShadowStepScale, edgeFactor);
-                            runtimeMaxRaySteps = Mathf.Max(64, Mathf.RoundToInt(runtimeMaxRaySteps * rayScale));
-                            runtimeMaxShadowSteps = Mathf.Max(16, Mathf.RoundToInt(runtimeMaxShadowSteps * shadowScale));
-                        }
-                    }
-                }
-            }
-
-            _rayMarchMaterial.SetBuffer(PropVoxelBuffer, ReadBuffer);
-            _rayMarchMaterial.SetBuffer(PropBrickMap, _brickMapBuffer);
-            _rayMarchMaterial.SetInt(PropWorldSize, worldSize);
-            _rayMarchMaterial.SetInt(PropBrickSize, brickSize);
-            _rayMarchMaterial.SetInt(PropBrickMapSize, BrickMapSize);
-            _rayMarchMaterial.SetFloat(PropVoxelScale, voxelScale);
-            _rayMarchMaterial.SetVector(PropWorldOrigin, WorldOrigin);
-            _rayMarchMaterial.SetInt(PropMaxSteps, runtimeMaxRaySteps);
-            _rayMarchMaterial.SetInt(PropMaxShadowSteps, runtimeMaxShadowSteps);
-            _rayMarchMaterial.SetFloat(PropMaxRenderDist, maxRenderDistance);
-
-            float fastLightingDist = Mathf.Max(6f, maxRenderDistance * fastLightingDistanceRatio);
-            float shadowRayMaxDist = Mathf.Max(4f, maxRenderDistance * shadowRayDistanceRatio);
-            if (enableGpuAdaptiveQuality && _gpuLoadBlend > 0f)
-            {
-                fastLightingDist *= Mathf.Lerp(1f, 0.55f, _gpuLoadBlend);
-                shadowRayMaxDist *= Mathf.Lerp(1f, 0.5f, _gpuLoadBlend);
-            }
-
-            // Temporal smoothing to prevent shadow/lighting boundary flickering
-            if (!_smoothedShadowParamsInit)
-            {
-                _smoothedFastLightingMaxDist = fastLightingDist;
-                _smoothedShadowRayMaxDist = shadowRayMaxDist;
-                _smoothedShadowParamsInit = true;
-            }
-            else
-            {
-                float shadowSmoothSpeed = Time.deltaTime * qualityTransitionSpeed * 0.35f;
-                _smoothedFastLightingMaxDist = Mathf.Lerp(_smoothedFastLightingMaxDist, fastLightingDist, shadowSmoothSpeed);
-                _smoothedShadowRayMaxDist = Mathf.Lerp(_smoothedShadowRayMaxDist, shadowRayMaxDist, shadowSmoothSpeed);
-            }
-
-            _rayMarchMaterial.SetFloat(PropFastLightingMaxDist, _smoothedFastLightingMaxDist);
-            _rayMarchMaterial.SetFloat(PropShadowRayMaxDist, _smoothedShadowRayMaxDist);
-            _rayMarchMaterial.SetVector(PropSunDir, sunDirection.normalized);
-            _rayMarchMaterial.SetColor(PropSunColor, sunColor);
-            _rayMarchMaterial.SetColor(PropAmbientColor, ambientColor);
-            _rayMarchMaterial.SetFloat(PropSunIntensity, sunIntensity);
-            _rayMarchMaterial.SetFloat(PropFogDensity, fogDensity);
-            _rayMarchMaterial.SetColor(PropFogColor, fogColor);
-
-            // Shadow: always keep keyword ON, use _ShadowStrength for smooth transition
-            float shadowStr = 1f;
-            if (enableShadows)
-            {
-                _rayMarchMaterial.EnableKeyword("VOXEL_SHADOWS_ON");
-                if (reduceShadowsWhileMoving && !stabilizeLightingWhileMoving)
-                    shadowStr = Mathf.Lerp(1f, movingShadowIntensity, _motionBlend);
-            }
-            else
-            {
-                _rayMarchMaterial.DisableKeyword("VOXEL_SHADOWS_ON");
-                shadowStr = 0f;
-            }
-            _rayMarchMaterial.SetFloat(PropShadowStrength, shadowStr);
-        }
-
-        private void UpdateLightingFromUnity()
-        {
-            if (!syncWithUnityDirectionalLight)
-                return;
-
-            Light source = directionalLightOverride;
-            if (source == null)
-            {
-                if (_cachedDirectionalLight == null)
-                {
-                    if (Time.time >= _nextDirectionalLightSearchTime)
-                    {
-                        _cachedDirectionalLight = RenderSettings.sun;
-                        _nextDirectionalLightSearchTime = Time.time + 1f;
-                    }
-                }
-                else
-                {
-                    if (!Application.isPlaying || !_cachedDirectionalLight.isActiveAndEnabled)
-                        _cachedDirectionalLight = null;
-                }
-
-                source = _cachedDirectionalLight;
-            }
-
-            if (source == null || source.type != LightType.Directional || !source.isActiveAndEnabled)
-                return;
-
-            sunDirection = -source.transform.forward;
-            sunColor = source.color;
-            sunIntensity = source.intensity;
-
-            if (syncAmbientFromRenderSettings)
-                ambientColor = RenderSettings.ambientLight;
-        }
-
-        /// <summary>
-        /// Check if the main camera is inside the voxel volume bounding box.
-        /// Used to switch cull mode for correct rendering.
-        /// </summary>
-        private bool IsCameraInsideVolume(float margin = 0.5f)
-        {
-            var cam = Camera.main;
-            if (cam == null) return false;
-            Vector3 local = cam.transform.position - WorldOrigin;
-            float ext = WorldExtent;
-            return local.x >= -margin && local.x <= ext + margin &&
-                   local.y >= -margin && local.y <= ext + margin &&
-                   local.z >= -margin && local.z <= ext + margin;
-        }
-
-        private float GetDistanceToVolumeBounds(Vector3 worldPos)
-        {
-            Vector3 min = WorldOrigin;
-            Vector3 max = WorldOrigin + Vector3.one * WorldExtent;
-
-            float dx = Mathf.Max(Mathf.Max(min.x - worldPos.x, 0f), worldPos.x - max.x);
-            float dy = Mathf.Max(Mathf.Max(min.y - worldPos.y, 0f), worldPos.y - max.y);
-            float dz = Mathf.Max(Mathf.Max(min.z - worldPos.z, 0f), worldPos.z - max.z);
-
-            return Mathf.Sqrt(dx * dx + dy * dy + dz * dz);
-        }
-
-        /// <summary>
-        /// Returns a 0-1 value indicating how intensely the camera is moving.
-        /// 0 = stationary, 1 = fast movement. Accounts for both position and rotation.
-        /// </summary>
-        private float GetCameraMotionIntensity()
-        {
-            var camera = Camera.main;
-            if (camera == null)
-                return 0f;
-
-            Vector3 currentPos = camera.transform.position;
-            Quaternion currentRot = camera.transform.rotation;
-
-            if (!_cameraPosInitialized)
-            {
-                _lastCameraPos = currentPos;
-                _lastCameraRot = currentRot;
-                _cameraPosInitialized = true;
-                return 0f;
-            }
-
-            float posDelta = (currentPos - _lastCameraPos).magnitude;
-            float rotDelta = Quaternion.Angle(_lastCameraRot, currentRot);
-
-            _lastCameraPos = currentPos;
-            _lastCameraRot = currentRot;
-
-            // Normalize: position delta weighted by threshold, rotation weighted by degrees
-            float posIntensity = Mathf.Clamp01(posDelta / Mathf.Max(cameraMotionThreshold * 5f, 0.01f));
-            float rotIntensity = Mathf.Clamp01(rotDelta / 6f); // smoother for camera look changes
-
-            return Mathf.Max(posIntensity, rotIntensity);
-        }
-
-        // =====================================================================
+        // =================================================================
         // Voxel Modification API
-        // =====================================================================
+        // =================================================================
 
         /// <summary>
-        /// Set a single voxel. This modifies the current read buffer directly.
-        /// Changes take effect next frame.
+        /// Set a single voxel. Changes take effect next frame.
         /// </summary>
         public void SetVoxel(Vector3Int pos, uint voxelData)
         {
@@ -921,8 +287,7 @@ namespace VoxelEngine
                 writes.Add(new VoxelWrite { index = idx, value = voxelValue });
             }
 
-            if (writes.Count == 0)
-                return;
+            if (writes.Count == 0) return;
 
             writes.Sort((a, b) => a.index.CompareTo(b.index));
 
@@ -970,60 +335,30 @@ namespace VoxelEngine
             return new Vector3(voxelPos.x + 0.5f, voxelPos.y + 0.5f, voxelPos.z + 0.5f) * voxelScale + WorldOrigin;
         }
 
-        // =====================================================================
+        // =================================================================
         // CPU-side Ray Cast (for interaction)
-        // =====================================================================
+        // =================================================================
 
         public uint[] GetCpuVoxelData(bool forceRefresh = false)
         {
-            if (ReadBuffer == null) return null;
-
-            EnsureCpuReadbackSlots();
-
-            if (!Application.isPlaying)
-            {
-                ReadBuffer.GetData(_cpuReadbackSlots[_cpuReadbackFrontSlot]);
-                _cpuReadbackReady = true;
-                return _cpuReadbackSlots[_cpuReadbackFrontSlot];
-            }
-
-            if (!useAsyncCpuReadback)
-            {
-                if (forceRefresh || Time.time - _lastCpuReadbackTime >= cpuReadbackInterval)
-                {
-                    ReadBuffer.GetData(_cpuReadbackSlots[_cpuReadbackFrontSlot]);
-                    _cpuReadbackReady = true;
-                    _lastCpuReadbackTime = Time.time;
-                }
-            }
-            else if (forceRefresh)
-            {
-                // Force new async request without blocking CPU on GPU completion.
-                RequestAsyncCpuReadback(force: true);
-            }
-
-            if (!_cpuReadbackReady)
-                return null;
-
-            return _cpuReadbackSlots[_cpuReadbackFrontSlot];
+            return _cpuReadback.GetData(ReadBuffer, TotalVoxels,
+                cpuReadbackInterval, useAsyncCpuReadback, forceRefresh);
         }
 
         /// <summary>
-        /// Perform a DDA ray cast through voxel data on CPU.
-        /// Requires GPU readback - use sparingly.
-        /// Returns (hitPos, normal, materialId) or null if no hit.
+        /// DDA ray cast through voxel data on CPU.
+        /// Returns true on hit with hitPos, hitNormal, hitMaterial populated.
         /// </summary>
-        public bool RaycastVoxel(Ray ray, float maxDist, out Vector3Int hitPos, out Vector3Int hitNormal, out uint hitMaterial)
+        public bool RaycastVoxel(Ray ray, float maxDist,
+            out Vector3Int hitPos, out Vector3Int hitNormal, out uint hitMaterial)
         {
             hitPos = Vector3Int.zero;
             hitNormal = Vector3Int.up;
             hitMaterial = 0;
 
-            // Convert ray to voxel space
             Vector3 origin = (ray.origin - WorldOrigin) / voxelScale;
             Vector3 dir = ray.direction;
 
-            // AABB intersection
             Vector3 invDir = new Vector3(
                 Mathf.Abs(dir.x) < 1e-8f ? 1e8f * Mathf.Sign(dir.x + 1e-10f) : 1f / dir.x,
                 Mathf.Abs(dir.y) < 1e-8f ? 1e8f * Mathf.Sign(dir.y + 1e-10f) : 1f / dir.y,
@@ -1042,11 +377,9 @@ namespace VoxelEngine
             if (tNear > tFar || tFar < 0) return false;
             tNear = Mathf.Max(tNear, 0.001f);
 
-            // Use throttled CPU snapshot to avoid full GPU readback every frame.
             var readbackData = GetCpuVoxelData();
             if (readbackData == null) return false;
 
-            // DDA in voxel space
             Vector3 startPos = origin + dir * tNear;
             startPos = Vector3.Max(startPos, Vector3.one * 0.001f);
             startPos = Vector3.Min(startPos, Vector3.one * (worldSize - 0.001f));
@@ -1099,7 +432,6 @@ namespace VoxelEngine
                     return true;
                 }
 
-                // Step
                 if (tMaxV.x < tMaxV.y)
                 {
                     if (tMaxV.x < tMaxV.z)
@@ -1135,39 +467,9 @@ namespace VoxelEngine
             return false;
         }
 
-        // =====================================================================
-        // Cleanup
-        // =====================================================================
-
-        private void Cleanup()
-        {
-            _voxelBufferA?.Release();
-            _voxelBufferB?.Release();
-            _brickMapBuffer?.Release();
-            _voxelBufferA = null;
-            _voxelBufferB = null;
-            _brickMapBuffer = null;
-            for (int i = 0; i < CpuReadbackSlotCount; i++)
-                _cpuReadbackSlots[i] = null;
-            _cpuReadbackFrontSlot = 0;
-            _cpuReadbackInFlightSlot = -1;
-            _cpuReadbackRequestPending = false;
-            _cpuReadbackReady = false;
-            _kernelsCached = false;
-            _smoothedShadowParamsInit = false;
-
-            if (_rayMarchMaterial != null)
-            {
-                if (Application.isPlaying)
-                    Destroy(_rayMarchMaterial);
-                else
-                    DestroyImmediate(_rayMarchMaterial);
-            }
-        }
-
-        // =====================================================================
+        // =================================================================
         // Gizmos
-        // =====================================================================
+        // =================================================================
 
         private void OnDrawGizmosSelected()
         {
@@ -1176,7 +478,6 @@ namespace VoxelEngine
             Gizmos.color = new Color(0, 1, 0, 0.3f);
             Gizmos.DrawWireCube(center, Vector3.one * extent);
 
-            // Draw water level
             float waterY = transform.position.y + worldSize * 0.3f * voxelScale;
             Gizmos.color = new Color(0, 0.5f, 1f, 0.15f);
             Gizmos.DrawCube(
@@ -1185,9 +486,9 @@ namespace VoxelEngine
             );
         }
 
-        // =====================================================================
+        // =================================================================
         // Validation
-        // =====================================================================
+        // =================================================================
 
         private void OnValidate()
         {
@@ -1205,6 +506,29 @@ namespace VoxelEngine
 
             if (worldSize % brickSize != 0)
                 brickSize = 8;
+        }
+
+        // =================================================================
+        // Helpers
+        // =================================================================
+
+        private FireSimulationSettings BuildFireSettings()
+        {
+            return new FireSimulationSettings
+            {
+                profile = fireProfile,
+                fireSpreadNeighborTemp = fireSpreadNeighborTemp,
+                woodCharTemp = woodCharTemp,
+                leafBurnTemp = leafBurnTemp,
+                coalBurnoutTemp = coalBurnoutTemp,
+                snowMeltTemp = snowMeltTemp,
+                waterEvapTemp = waterEvapTemp,
+                burningLightTemp = burningLightTemp,
+                heatRiseRate = heatRiseRate,
+                coolRate = coolRate,
+                heatSinkExtraCool = heatSinkExtraCool,
+                coalBurnoutChanceDiv = coalBurnoutChanceDiv
+            };
         }
     }
 }

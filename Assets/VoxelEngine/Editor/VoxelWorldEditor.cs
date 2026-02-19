@@ -11,24 +11,10 @@ namespace VoxelEngine.Editor
         private SerializedProperty _brickSize;
         private SerializedProperty _voxelScale;
         private SerializedProperty _terrainGenShader;
-        private SerializedProperty _terrainScale;
-        private SerializedProperty _caveScale;
-        private SerializedProperty _caveThreshold;
         private SerializedProperty _seed;
         private SerializedProperty _simulationShader;
         private SerializedProperty _brickMapShader;
-        private SerializedProperty _enableSimulation;
-        private SerializedProperty _simulationStepsPerFrame;
         private SerializedProperty _rayMarchShader;
-        private SerializedProperty _maxRaySteps;
-        private SerializedProperty _maxShadowSteps;
-        private SerializedProperty _enableShadows;
-        private SerializedProperty _ambientColor;
-        private SerializedProperty _sunColor;
-        private SerializedProperty _sunIntensity;
-        private SerializedProperty _sunDirection;
-        private SerializedProperty _fogDensity;
-        private SerializedProperty _fogColor;
 
         private bool _showWorldInfo = true;
 
@@ -38,24 +24,10 @@ namespace VoxelEngine.Editor
             _brickSize = serializedObject.FindProperty("brickSize");
             _voxelScale = serializedObject.FindProperty("voxelScale");
             _terrainGenShader = serializedObject.FindProperty("terrainGenShader");
-            _terrainScale = serializedObject.FindProperty("terrainScale");
-            _caveScale = serializedObject.FindProperty("caveScale");
-            _caveThreshold = serializedObject.FindProperty("caveThreshold");
             _seed = serializedObject.FindProperty("seed");
             _simulationShader = serializedObject.FindProperty("simulationShader");
             _brickMapShader = serializedObject.FindProperty("brickMapShader");
-            _enableSimulation = serializedObject.FindProperty("enableSimulation");
-            _simulationStepsPerFrame = serializedObject.FindProperty("simulationStepsPerFrame");
             _rayMarchShader = serializedObject.FindProperty("rayMarchShader");
-            _maxRaySteps = serializedObject.FindProperty("maxRaySteps");
-            _maxShadowSteps = serializedObject.FindProperty("maxShadowSteps");
-            _enableShadows = serializedObject.FindProperty("enableShadows");
-            _ambientColor = serializedObject.FindProperty("ambientColor");
-            _sunColor = serializedObject.FindProperty("sunColor");
-            _sunIntensity = serializedObject.FindProperty("sunIntensity");
-            _sunDirection = serializedObject.FindProperty("sunDirection");
-            _fogDensity = serializedObject.FindProperty("fogDensity");
-            _fogColor = serializedObject.FindProperty("fogColor");
         }
 
         public override void OnInspectorGUI()
@@ -68,6 +40,24 @@ namespace VoxelEngine.Editor
             EditorGUILayout.LabelField("Voxel Engine", EditorStyles.boldLabel);
             EditorGUILayout.LabelField("GPU-accelerated voxel rendering & simulation", EditorStyles.miniLabel);
             EditorGUILayout.Space(10);
+
+            if (!Application.isPlaying && GUILayout.Button("Run Editor Setup"))
+            {
+                VoxelSceneSetup.SetupScene();
+                EditorGUIUtility.PingObject(target);
+            }
+
+            if (_terrainGenShader.objectReferenceValue == null ||
+                _simulationShader.objectReferenceValue == null ||
+                _brickMapShader.objectReferenceValue == null ||
+                _rayMarchShader.objectReferenceValue == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "Missing shader references detected. Use 'Run Editor Setup' to auto-assign required assets.",
+                    MessageType.Warning);
+            }
+
+            EditorGUILayout.Space(5);
 
             // World info
             _showWorldInfo = EditorGUILayout.Foldout(_showWorldInfo, "World Information", true);
