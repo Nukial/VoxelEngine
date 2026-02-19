@@ -74,7 +74,6 @@ namespace VoxelEngine
         [SerializeField] [Min(0.1f)] private float edgeLoadDistance = 8f;
         [SerializeField] [Range(0.35f, 1.0f)] private float edgeRayStepScale = 0.7f;
         [SerializeField] [Range(0.2f, 1.0f)] private float edgeShadowStepScale = 0.65f;
-        [SerializeField] private bool useDynamicVolumeCulling = true;
 
         [Header("Adaptive Quality")]
         [SerializeField] private bool enableAdaptiveQuality = true;
@@ -151,8 +150,6 @@ namespace VoxelEngine
         private Quaternion _lastCameraRot;
         private Light _cachedDirectionalLight;
         private float _nextDirectionalLightSearchTime;
-        private bool _insideVolumeState;
-        private bool _insideVolumeStateInitialized;
         private float _smoothedShadowRayMaxDist;
         private float _smoothedFastLightingMaxDist;
         private bool _smoothedShadowParamsInit;
@@ -196,7 +193,6 @@ namespace VoxelEngine
         private static readonly int PropCaveThreshold = Shader.PropertyToID("_CaveThreshold");
         private static readonly int PropWaterLevel = Shader.PropertyToID("_WaterLevel");
         private static readonly int PropMaxRenderDist = Shader.PropertyToID("_MaxRenderDist");
-        private static readonly int PropCullMode = Shader.PropertyToID("_Cull");
         private static readonly int PropShadowStrength = Shader.PropertyToID("_ShadowStrength");
         private static readonly int PropFastLightingMaxDist = Shader.PropertyToID("_FastLightingMaxDist");
         private static readonly int PropShadowRayMaxDist = Shader.PropertyToID("_ShadowRayMaxDist");
@@ -340,7 +336,6 @@ namespace VoxelEngine
 
         private void Initialize()
         {
-            _insideVolumeStateInitialized = false;
             _smoothedShadowParamsInit = false;
             CreateBuffers();
             CacheKernelIDs();
@@ -692,19 +687,8 @@ namespace VoxelEngine
                 runtimeMaxShadowSteps = Mathf.RoundToInt(Mathf.Lerp(runtimeMaxShadowSteps, gpuShadowTarget, _gpuLoadBlend));
             }
 
-            if (useDynamicVolumeCulling)
-            {
-                // Always cull front faces (render back faces only).
-                // For a convex box mesh, back faces project to the same screen
-                // pixels as front faces from any viewpoint, so ray-marching works
-                // correctly from both inside and outside the volume without needing
-                // to switch cull modes (which caused terrain to vanish near edges).
-                _rayMarchMaterial.SetFloat(PropCullMode, 1f);
-            }
-            else
-            {
-                _rayMarchMaterial.SetFloat(PropCullMode, 0f);
-            }
+            // Cull Front is hardcoded in the shader — back faces are always
+            // rendered so ray-marching works from any camera position.
 
             // Distance-based quality scaling
             var camera = Camera.main;
@@ -848,32 +832,6 @@ namespace VoxelEngine
             return local.x >= -margin && local.x <= ext + margin &&
                    local.y >= -margin && local.y <= ext + margin &&
                    local.z >= -margin && local.z <= ext + margin;
-        }
-
-        private bool GetSmoothedInsideVolumeState()
-        {
-            const float insideMargin = 0.2f;
-            const float outsideMargin = 0.8f;
-
-            if (!_insideVolumeStateInitialized)
-            {
-                _insideVolumeState = IsCameraInsideVolume(insideMargin);
-                _insideVolumeStateInitialized = true;
-                return _insideVolumeState;
-            }
-
-            if (_insideVolumeState)
-            {
-                if (!IsCameraInsideVolume(outsideMargin))
-                    _insideVolumeState = false;
-            }
-            else
-            {
-                if (IsCameraInsideVolume(insideMargin))
-                    _insideVolumeState = true;
-            }
-
-            return _insideVolumeState;
         }
 
         private float GetDistanceToVolumeBounds(Vector3 worldPos)
@@ -1196,7 +1154,6 @@ namespace VoxelEngine
             _cpuReadbackRequestPending = false;
             _cpuReadbackReady = false;
             _kernelsCached = false;
-            _insideVolumeStateInitialized = false;
             _smoothedShadowParamsInit = false;
 
             if (_rayMarchMaterial != null)

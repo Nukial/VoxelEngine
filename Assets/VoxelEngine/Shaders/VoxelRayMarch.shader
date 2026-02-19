@@ -18,8 +18,6 @@ Shader "VoxelEngine/RayMarch"
         _FastLightingMaxDist ("Fast Lighting Max Distance", Float) = 40
         _ShadowRayMaxDist ("Shadow Ray Max Distance", Float) = 32
         
-        [Header(Culling)]
-        [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull Mode", Float) = 1
     }
     
     SubShader
@@ -36,7 +34,7 @@ Shader "VoxelEngine/RayMarch"
             Name "VoxelRayMarch"
             Tags { "LightMode" = "UniversalForward" }
             
-            Cull [_Cull]
+            Cull Front
             ZWrite On
             ZTest LEqual
             
@@ -826,7 +824,7 @@ Shader "VoxelEngine/RayMarch"
             Name "DepthOnly"
             Tags { "LightMode" = "DepthOnly" }
             
-            Cull [_Cull]
+            Cull Front
             ZWrite On
             ColorMask 0
             

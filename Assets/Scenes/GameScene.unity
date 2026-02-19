@@ -411,6 +411,7 @@ MonoBehaviour:
   enableSimulation: 1
   simulationStepsPerFrame: 1
   simulationTickRate: 30
+  lightPropagationPasses: 5
   fireProfile: 1
   fireSpreadNeighborTemp: 10
   woodCharTemp: 13
@@ -431,6 +432,10 @@ MonoBehaviour:
   maxRenderDistance: 80
   distanceQualityFactor: 0.6
   renderDistanceFadeRatio: 0.8
+  enableEdgeLoadGuard: 1
+  edgeLoadDistance: 8
+  edgeRayStepScale: 0.7
+  edgeShadowStepScale: 0.65
   enableAdaptiveQuality: 1
   movingRaySteps: 160
   movingShadowSteps: 40
@@ -440,6 +445,12 @@ MonoBehaviour:
   stabilizeLightingWhileMoving: 1
   movingShadowIntensity: 0.35
   qualityTransitionSpeed: 6
+  enableGpuAdaptiveQuality: 1
+  gpuTargetFrameRate: 60
+  gpuRayStepFloor: 0.58
+  gpuShadowStepFloor: 0.45
+  fastLightingDistanceRatio: 0.52
+  shadowRayDistanceRatio: 0.45
   syncWithUnityDirectionalLight: 1
   directionalLightOverride: {fileID: 0}
   syncAmbientFromRenderSettings: 0
