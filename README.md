@@ -144,6 +144,16 @@ The most realistic long-term direction is a **hybrid architecture**:
 - use Unity for editor workflow, camera, input, UI, audio, build pipeline, and high-level scene management,
 - keep the pure GPU volume path as a research/demo layer rather than forcing the whole game to depend on it.
 
+## References and acknowledgements
+
+VoxelEngine acknowledges [`JorisAR/GDVoxelPlayground`](https://github.com/JorisAR/GDVoxelPlayground) as an important technical reference and inspiration source.
+
+GDVoxelPlayground is a Godot-based voxel playground that implements cellular automata voxel simulation rendered using ray marching. Its documented feature set includes a ray marcher optimized using a brick map and cellular automata with multiple materials.
+
+VoxelEngine explores related ideas in Unity/C#/HLSL, including GPU-style voxel data, ray-marched rendering, brick-map acceleration, and material simulation. VoxelEngine is a separate research prototype and is not affiliated with, endorsed by, or maintained by JorisAR.
+
+See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for attribution and MIT license notice information related to GDVoxelPlayground.
+
 ## Repository layout
 
 Important areas of the project include:
@@ -205,6 +215,8 @@ You may read the code, study it, fork it for personal non-commercial research, a
 You may not use this project as the base of a commercial product, sell it, repackage it, redistribute it as an engine/plugin/SDK, or remove attribution without explicit written permission from the copyright holder.
 
 See [`LICENSE`](LICENSE) for the full terms.
+
+Third-party references and notices are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Disclaimer
 
