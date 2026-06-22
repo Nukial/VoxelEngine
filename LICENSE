@@ -1,0 +1,71 @@
+VoxelEngine Source-Available Research License 1.0
+
+Copyright (c) 2026 Nukial / Văn Luận Đinh.
+All rights reserved except as expressly granted below.
+
+This is not an open-source license as defined by the Open Source Initiative. This license is intended for research visibility, technical study, personal experimentation, and controlled collaboration only.
+
+1. Definitions
+
+"Project" means the VoxelEngine repository, including source code, shaders, assets, documentation, examples, and related files.
+
+"You" means any person or organization accessing, copying, forking, modifying, or using the Project.
+
+"Non-commercial" means use that is not primarily intended for commercial advantage, monetary compensation, product development, client delivery, paid service delivery, resale, sublicensing, advertising revenue, or business operation.
+
+2. Permissions
+
+Subject to the restrictions below, you are permitted to:
+
+- view and study the Project source code;
+- clone or fork the Project for personal non-commercial research and learning;
+- modify the Project privately for personal non-commercial experiments;
+- run the Project locally for testing, benchmarking, and demonstration;
+- submit issues, benchmark notes, technical feedback, or pull requests to the original repository;
+- quote small portions of the Project in articles, videos, or research notes, provided that clear attribution is given to the original Project and author.
+
+3. Restrictions
+
+You may not, without explicit prior written permission from the copyright holder:
+
+- use the Project, modified or unmodified, in a commercial product, commercial game, paid tool, paid plugin, paid SDK, client project, or commercial service;
+- sell, rent, lease, sublicense, or otherwise commercialize the Project;
+- redistribute the Project or a modified version of the Project outside normal GitHub fork/contribution workflows;
+- repackage the Project as another engine, framework, plugin, asset package, template, or SDK;
+- remove, hide, or alter copyright notices, license notices, attribution, or project identity;
+- claim authorship of the Project or present it as your original work;
+- use the Project name, author identity, screenshots, videos, or branding to imply endorsement without permission;
+- use the Project to train, fine-tune, evaluate, or create machine-learning models or datasets for commercial purposes without permission;
+- use the Project in any way that violates applicable law or third-party rights.
+
+4. Contributions
+
+By submitting a contribution, pull request, patch, issue code sample, or other proposed change to the original repository, you grant the copyright holder a perpetual, worldwide, royalty-free, non-exclusive license to use, modify, publish, distribute, and sublicense that contribution as part of the Project.
+
+You represent that you have the right to submit the contribution and that it does not knowingly infringe the rights of others.
+
+5. Commercial licensing
+
+Commercial use requires a separate written license agreement from the copyright holder. Contact the repository owner if you want to use the Project or any substantial part of it in a commercial context.
+
+6. No warranty
+
+The Project is provided "AS IS", without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, non-infringement, performance, stability, compatibility, or correctness.
+
+7. Limitation of liability
+
+In no event shall the copyright holder be liable for any claim, damage, loss, cost, data loss, business interruption, hardware failure, software failure, or other liability arising from access to, use of, modification of, or inability to use the Project.
+
+8. Termination
+
+Your rights under this license terminate automatically if you violate any term of this license. Upon termination, you must stop using the Project and delete any copies or modified versions in your possession, except where retention is required by law.
+
+9. Third-party components
+
+The Project may depend on third-party software, Unity packages, shaders, tools, or assets that are governed by their own licenses. This license does not grant rights to third-party materials beyond what their respective licenses allow.
+
+10. Governing interpretation
+
+If any part of this license is found unenforceable, the remaining terms remain in effect as far as legally permitted.
+
+For permissions beyond this license, contact the repository owner.
